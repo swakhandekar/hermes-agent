@@ -120,6 +120,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS/Windows/Linux)", "background desktop control via cua-driver"),
+    ("twilio_verify",    "🔐 Twilio Verify (OTP)",       "start/check one-time verification codes (requires TWILIO_VERIFY_SERVICE_SID)"),
 ]
 
 
@@ -152,7 +153,10 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
+#
+# Twilio Verify is off by default because a 'start' call sends a real
+# SMS/call/email/WhatsApp message to a real person — no auto-enable rule.
+_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a", "twilio_verify"}
 
 
 # Config-only capabilities: they appear in `hermes tools` for provider/API-key

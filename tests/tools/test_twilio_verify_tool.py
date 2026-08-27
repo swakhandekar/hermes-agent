@@ -56,6 +56,33 @@ def test_registered_in_its_own_opt_in_toolset():
     }
 
 
+def test_toolset_is_reachable_through_the_real_config_resolution_path(monkeypatch):
+    """Registering a tool (tools/registry.py) is not enough to expose it to a
+    session -- CONTRIBUTING.md's 'wire it into the relevant platform presets'
+    step means hermes_cli.tools_config._get_platform_tools (what cli.py,
+    the gateway, and cron all actually call) must also be able to resolve
+    the toolset. Without an entry in CONFIGURABLE_TOOLSETS, a user could
+    list 'twilio_verify' in their config forever and it would never load."""
+    from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_platform_tools
+
+    assert "twilio_verify" in {key for key, _, _ in CONFIGURABLE_TOOLSETS}
+
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "twilio_verify"]}}
+    assert "twilio_verify" in _get_platform_tools(config, "cli")
+
+
+def test_toolset_is_off_by_default(monkeypatch):
+    """A 'start' call sends a real message to a real person -- must not be
+    auto-enabled for a session that never asked for it."""
+    from hermes_cli.tools_config import _DEFAULT_OFF_TOOLSETS, _get_platform_tools
+
+    assert "twilio_verify" in _DEFAULT_OFF_TOOLSETS
+    assert "twilio_verify" not in _get_platform_tools({}, "cli")
+
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "vision"]}}
+    assert "twilio_verify" not in _get_platform_tools(config, "cli")
+
+
 # ---------------------------------------------------------------------------
 # Requirements probe
 
