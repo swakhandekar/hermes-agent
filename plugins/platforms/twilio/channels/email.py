@@ -1,59 +1,42 @@
 """Email channel for the Twilio plugin.
 
-Sends through Twilio's Email API (One Console): a REST API at
-``comms.twilio.com``, distinct from the older SendGrid ``api.sendgrid.com``
-v3 Mail Send API. Auth is the same core Twilio credential pair every other
-channel here uses -- ``TWILIO_ACCOUNT_SID``/``TWILIO_AUTH_TOKEN`` via HTTP
-Basic Auth, not a separate SendGrid key -- so this channel reuses
-``core/credentials.py`` rather than declaring its own credential reader.
+Sends through Twilio's Email API (One Console, ``comms.twilio.com``) --
+not the older SendGrid ``api.sendgrid.com`` v3 Mail Send API. Auth is the
+same ``TWILIO_ACCOUNT_SID``/``TWILIO_AUTH_TOKEN`` every other channel
+uses, via ``core/credentials.py`` -- not a separate SendGrid key.
 
 Docs: https://www.twilio.com/docs/email/api/overview
 
-That's still why this channel implements ``Channel`` directly rather than
-``MessagingChannel``: it doesn't use ``MessagingServiceSid`` or the
-Messages.json resource at all -- its request/response shape (JSON body,
-async 202 + ``operationId``, not form-encoded) is nothing like the other
-channels' transport.
+Implements ``Channel`` directly, not ``MessagingChannel``: its
+request/response shape (JSON body, async 202 + ``operationId``) has
+nothing to do with the Messages.json resource other channels use.
 
-Every other channel in this plugin passes a single `content` string with
-no subject concept. By convention here: the first line of `content` is
-the subject and the remainder (after the first newline) is the body;
-single-line content gets a generic default subject rather than guessing
-one. Callers with more control (e.g. direct-Python use) can override via
-`metadata={"subject": ..., "html": True, "attachments": [...]}`.
+Subject/body: the first line of `content` is the subject, the rest is
+the body -- single-line content gets a generic default subject. Override
+via `metadata={"subject": ..., "html": True, "attachments": [...]}`.
 
-**Async by design, not a delivery guarantee.** A successful call returns
-``202`` with an ``operationId`` -- the send was accepted for processing,
-not delivered. This channel doesn't poll the Email Operation resource
-(``GET .../Operations/{operationId}``); the ``operationId`` comes back as
-``message_id`` for anyone who wants to check later.
+**Async, not a delivery guarantee.** A 202 + ``operationId`` means
+accepted for processing, not delivered. Not polled here; ``operationId``
+comes back as ``message_id``.
 
-**Two payload quirks confirmed live, contradicting the docs:**
-- ``from.name`` must always be present, or the API returns a generic
-  "Invalid value provided for field 'from'" that masks the actual (more
-  specific) validation error underneath, e.g. domain authorization.
-- ``content.html`` is required even for a plain-text send. The docs
-  describe auto-generating a ``text`` fallback *from* ``html``, not the
-  reverse -- a request with only ``content.text`` gets rejected.
+**Two quirks confirmed live, against the docs:** ``from.name`` must
+always be set, or the API returns a generic 'from' error that masks the
+real one (e.g. domain authorization); ``content.html`` is required even
+for plain text -- the docs describe generating ``text`` *from* ``html``,
+not the reverse.
 
-Attachments: `send_image()`/`send_document()`/`send_multiple_images()`
-(live gateway, dispatched from `adapter.py`) and `media_files` on
-`standalone_send()` (the `hermes send`/cron path) all attach local files
-as base64 content in the request's `content.attachments` array. Remote
-(http/https) image URLs are not downloaded -- they're linked in the body
-text instead, matching the built-in `email` plugin's own convention.
+Attachments: `send_image`/`send_document`/`send_multiple_images` (live)
+and `media_files` on `standalone_send` (`hermes send`/cron) attach local
+files as base64 in `content.attachments`. Remote image URLs are linked
+in the body, not downloaded -- matches the built-in `email` plugin.
 
-Known gaps (unconfirmed API shape or out of scope so far): no cc/bcc, no
-scheduled send (`schedule.sendAt`), no inline `cid` image references.
+Known gaps: no cc/bcc, no scheduled send, no inline `cid` images.
 
-Unlike RCS, this channel never splits a message into multiple
-chunks/sends: an email is one document, not a multi-part SMS train.
+Unlike RCS, never splits into multiple sends -- an email is one document.
 
-Self-contained: nothing outside this file needs to change to modify Email
-behavior beyond `core/credentials.py`'s shared helpers, and this file
-never reaches into another channel's module. If a future channel also
-needs this same JSON/REST transport shape, extract the shared bits into
-a `core/` module then -- not preemptively, for one consumer.
+Self-contained: nothing outside this file changes for Email behavior
+beyond `core/credentials.py`. Extract shared transport to `core/` only
+once a second consumer needs it.
 """
 
 import asyncio
@@ -108,36 +91,22 @@ def _mask_email(address: str) -> str:
 
 
 def _redact_emails_in_text(text: str) -> str:
-    """Mask any email addresses inside arbitrary text before it is logged or
-    handed back to a caller. The API's own validation errors can echo the
-    offending to/from address back in the response body -- unlike
-    ``chat_id``, that text was never run through ``_mask_email`` before, so
-    a bad address could reach application logs, and from there
-    ``tools/send_message_tool.py``'s ``{"error": f"Adapter send failed:
-    {result.error}"}`` puts it straight into the agent's own context too.
-    """
+    """Mask email addresses before logging or returning to a caller -- the
+    API's validation errors can echo a bad to/from address back, which
+    would otherwise reach logs and the agent's own tool-result context."""
     return _EMAIL_IN_TEXT_RE.sub(lambda m: _mask_email(m.group(0)), text)
 
 
 def _format_exception_error(e: Exception) -> str:
-    """Render an exception so it's never an empty/near-empty error string.
-
-    ``asyncio.TimeoutError`` and several aiohttp connector/SSL errors
-    stringify to ``""``. Also runs the result through
-    ``_redact_emails_in_text`` -- defense in depth, since an exception's
-    message could in principle echo back request/response content.
-    """
+    """Render an exception so it's never blank -- asyncio.TimeoutError and
+    some aiohttp errors stringify to "". Also redacts, defensively."""
     text = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
     return _redact_emails_in_text(text)
 
 
 def _sanitize_subject(subject: str) -> str:
-    """Strip CR/LF/tab so a subject can never inject extra headers into the
-    outbound email (CWE-93), regardless of whether it came from the
-    first-line convention (which can still carry a bare ``\\r`` even though
-    ``partition("\\n")`` rules out ``\\n``) or an explicit metadata override
-    (which has no structural protection at all).
-    """
+    """Strip CR/LF/tab so a subject can't inject extra headers (CWE-93) --
+    needed even after the first-line split, which only rules out ``\\n``."""
     cleaned = re.sub(r"[\r\n\t]+", " ", subject).strip()
     return cleaned or DEFAULT_SUBJECT
 
@@ -153,22 +122,19 @@ def _split_subject_and_body(content: str) -> Tuple[str, str]:
 
 
 def _plain_text_to_html(text: str) -> str:
-    """Minimal plain-text -> HTML so a plain-text send always has a
-    non-empty ``content.html`` -- see module docstring's "payload quirks".
-    """
+    """Minimal plain-text -> HTML so a plain-text send has a non-empty
+    ``content.html`` -- see module docstring's quirks."""
     return _html_lib.escape(text).replace("\n", "<br>\n")
 
 
 def _build_attachments(
     file_paths: List[str],
 ) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    """Read local files into the API's attachment shape (base64 content).
+    """Read local files into the API's attachment shape (base64).
 
-    Returns ``(attachments, error)``. On any missing/unreadable file or a
-    combined size over ``MAX_ATTACHMENT_BYTES_RAW``, returns ``([], error)``
-    -- the whole send is refused rather than going out with only some of
-    its attachments, which would silently misrepresent what was sent.
-    """
+    Returns ``(attachments, error)``. Any missing file or a combined size
+    over ``MAX_ATTACHMENT_BYTES_RAW`` refuses the whole send rather than
+    going out with only some attachments."""
     attachments: List[Dict[str, str]] = []
     total_bytes = 0
     for file_path in file_paths:
@@ -203,13 +169,8 @@ def _build_attachments(
 async def _build_attachments_async(
     file_paths: List[str],
 ) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    """Run _build_attachments() off the event loop.
-
-    It does blocking file I/O (and base64-encodes up to ~7 MB), which would
-    otherwise stall every other chat/platform the gateway is servicing for
-    the duration -- matches the built-in `email` plugin's own
-    `loop.run_in_executor(...)` convention for blocking send-path work.
-    """
+    """Runs _build_attachments() off the event loop -- it's blocking file
+    I/O, matching the built-in `email` plugin's run_in_executor use."""
     return await asyncio.get_running_loop().run_in_executor(
         None, _build_attachments, file_paths
     )
@@ -416,11 +377,8 @@ class EmailChannel(Channel):
         metadata: Optional[dict] = None,
         session=None,
     ) -> Dict[str, Any]:
-        """Attach a local image directly; link remote images in the body.
-
-        Remote images are not downloaded here -- same convention the
-        built-in `email` plugin uses for remote image URLs.
-        """
+        """Attach a local image directly; link remote images in the body
+        instead of downloading, matching the built-in `email` plugin."""
         if image_url.startswith("file://"):
             from urllib.parse import unquote
 
@@ -463,12 +421,8 @@ class EmailChannel(Channel):
         metadata: Optional[dict] = None,
         session=None,
     ) -> Dict[str, Any]:
-        """Send a batch of images as one email with multiple attachments.
-
-        Local files are attached directly (one API call, multiple
-        attachments); remote URLs are linked in the body instead of
-        downloaded, matching send_image()'s convention.
-        """
+        """Send a batch of images as one email. Local files attach directly
+        (one call, multiple attachments); remote URLs link in the body."""
         if not images:
             return {"success": True}
 
@@ -505,13 +459,10 @@ class EmailChannel(Channel):
     async def standalone_send(
         self, pconfig, chat_id: str, message: str, **kwargs
     ) -> Dict[str, Any]:
-        """Out-of-process delivery for `hermes send` and cron
-        `deliver=twilio` when no live gateway adapter is present. Accepts
-        `media_files` (via **kwargs, per the Channel contract) for
-        MEDIA:<path> attachments -- `force_document` has no effect, since
-        the Email API's attachments have no inline-vs-document distinction
-        (unlike Telegram/WhatsApp document mode).
-        """
+        """Out-of-process delivery for `hermes send`/cron when no live
+        gateway adapter exists. `media_files` (via **kwargs) attaches
+        MEDIA:<path> files; `force_document` has no effect -- email
+        attachments have no inline-vs-document distinction."""
         import aiohttp
 
         from gateway.platforms.base import proxy_kwargs_for_aiohttp, resolve_proxy_url

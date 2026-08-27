@@ -2,15 +2,15 @@
 dispatches to whichever channel matches the target format (see
 channels/base.py, README "Architecture notes").
 
-Channels: RCS (phone number), Email (email address). More (SMS, MMS,
-WhatsApp, Voice) are expected to land in _CHANNELS over time — see
-README "Adding a new channel" for the disambiguation concern once a
-channel shares an existing one's target format.
+Channels: RCS (phone number), Email (email address). More channels are
+expected to land in _CHANNELS over time — see README "Adding a new
+channel" for the disambiguation concern if one shares an existing
+target format.
 
 Env vars: TWILIO_ACCOUNT_SID/AUTH_TOKEN (shared with the built-in sms
 platform), TWILIO_MESSAGING_SERVICE_SID (RCS), TWILIO_EMAIL_FROM
-(Email), TWILIO_RCS_HOME_CHANNEL / TWILIO_EMAIL_HOME_CHANNEL (optional
-per-channel cron targets — see "cron_deliver_env_var" below).
+(Email); TWILIO_RCS_HOME_CHANNEL/TWILIO_EMAIL_HOME_CHANNEL are optional
+per-channel cron targets (see cron_deliver_env_var below).
 
 No inbound channel — connect()/disconnect() are no-ops. Delivery is
 send() (live gateway) or _standalone_send() (hermes send / cron).
@@ -145,11 +145,9 @@ class TwilioAdapter(BasePlatformAdapter):
     async def _dispatch_attachment_call(
         self, chat_id: str, method_name: str, *args, fallback, **kwargs
     ):
-        """Shared plumbing for send_image()/send_document()/send_multiple_images():
-        dispatch to the matched channel's own method if it has one (Email
-        does; RCS doesn't — it has no attachment concept beyond its
-        CONTENT: directive), else fall back to BasePlatformAdapter's default.
-        """
+        """Dispatch send_image/send_document/send_multiple_images to the
+        matched channel's own method if it has one (Email does; RCS
+        doesn't), else fall back to BasePlatformAdapter's default."""
         channel = _channel_for_target(chat_id)
         method = getattr(channel, method_name, None) if channel else None
         if method is None:
@@ -254,11 +252,9 @@ async def _standalone_send(
     media_files=None,
     force_document=False,
 ):
-    """Out-of-process delivery for `hermes send` and cron `deliver=twilio`
-    when no live gateway adapter is present in this process. Forwards
-    media_files/force_document/thread_id through **kwargs per the Channel
-    contract — RCS's standalone_send() (inherited from MessagingChannel)
-    ignores them via its own **kwargs, Email's uses media_files."""
+    """Out-of-process delivery for `hermes send`/cron when no live gateway
+    adapter exists. Forwards media_files/force_document/thread_id via
+    **kwargs — RCS ignores them, Email's uses media_files."""
     channel = _channel_for_target(chat_id)
     if channel is None:
         return {
