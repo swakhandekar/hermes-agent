@@ -126,7 +126,20 @@ TOOLSETS = {
         "tools": ["x_search"],
         "includes": []
     },
-    
+
+    "twilio_verify": {
+        "description": (
+            "Send and check one-time verification codes (OTP) via Twilio "
+            "Verify -- a human-confirmation gate before irreversible or "
+            "high-stakes actions. Requires TWILIO_ACCOUNT_SID, "
+            "TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID. Off by "
+            "default (a 'start' call sends a real message to a real "
+            "person); enable in `hermes tools` → Twilio Verify."
+        ),
+        "tools": ["twilio_verify"],
+        "includes": []
+    },
+
     "vision": {
         "description": "Image analysis and vision tools",
         "tools": ["vision_analyze"],
