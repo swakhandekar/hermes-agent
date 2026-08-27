@@ -287,6 +287,41 @@ def test_send_with_metadata_attachments(monkeypatch, tmp_path):
     assert sent_attachments[0]["filename"] == "report.pdf"
 
 
+def test_send_with_metadata_media_files(monkeypatch, tmp_path):
+    """metadata["media_files"] is the (path, is_voice) tuple-list shape
+    send_message_tool._send_via_adapter forwards for a MEDIA:<path> tag when
+    a live gateway adapter is connected (the common case for cron, which
+    runs in-process) — must attach the same as metadata["attachments"]."""
+    _configure(monkeypatch)
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    channel = email_channel.EmailChannel()
+
+    mock_resp = _mock_response(202, json_body={"operationId": "op456"})
+    mock_session = MagicMock()
+    mock_session.close = AsyncMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        result = asyncio.run(
+            channel.send(
+                "customer@example.com",
+                "Report attached",
+                metadata={"media_files": [(str(f), False)]},
+            )
+        )
+
+    assert result["success"] is True
+    sent_attachments = captured["payload"]["content"]["attachments"]
+    assert sent_attachments[0]["filename"] == "report.pdf"
+
+
 def test_send_document_attaches_local_file(monkeypatch, tmp_path):
     _configure(monkeypatch)
     f = tmp_path / "invoice.txt"

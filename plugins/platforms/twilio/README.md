@@ -184,10 +184,15 @@ landing on this same first-line convention, not a separate code path.
 the request; ~7 MB cap, headroom under the API's 10 MB total-request
 limit); remote `http(s)://` image URLs are linked in the body text
 instead of downloaded (matches the built-in `email` plugin's own
-convention). Reachable via `MEDIA:<path>` (the `hermes send`/cron path)
-or, for direct-Python callers only, `metadata={"attachments": [...]}`
-on `send()` — nothing in this repo actually calls `send()` with
-`metadata` today.
+convention). Reachable via `MEDIA:<path>` through both delivery paths —
+`_standalone_send()`'s `media_files` kwarg (`hermes send`/cron with no
+live gateway) and `send()`'s `metadata["media_files"]` (a live gateway
+adapter, which is what actually runs a cron job when the gateway
+process itself has a scheduler — see `tools/send_message_tool.py`'s
+`_send_via_adapter` for how it gets there). Both read the same
+`(path, is_voice)` tuple-list shape. A direct-Python caller can also
+pass bare paths via `metadata={"attachments": [...]}` on `send()`; both
+keys are additive.
 
 **Scheduled send** — `metadata={"schedule_at": "<RFC 3339>"}` on
 `send()`, or `schedule_at="<RFC 3339>"` as a kwarg on

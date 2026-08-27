@@ -349,12 +349,18 @@ class EmailChannel(Channel):
         else:
             subject, body = _split_subject_and_body(content)
 
-        attachment_paths = meta.get("attachments") or []
+        # Two attachment conventions land here: `attachments` (bare paths,
+        # for a direct-Python caller) and `media_files` ((path, is_voice)
+        # tuples — send_message_tool._send_via_adapter's live-adapter path
+        # forwards a MEDIA:<path> tag this way; see its docstring). Both are
+        # honored so a live adapter and standalone_send() behave the same.
+        attachment_paths = list(meta.get("attachments") or [])
+        attachment_paths.extend(
+            path for path, _is_voice in (meta.get("media_files") or [])
+        )
         attachments: List[Dict[str, str]] = []
         if attachment_paths:
-            attachments, attach_error = await _build_attachments_async(
-                list(attachment_paths)
-            )
+            attachments, attach_error = await _build_attachments_async(attachment_paths)
             if attach_error:
                 return {"success": False, "error": attach_error}
 

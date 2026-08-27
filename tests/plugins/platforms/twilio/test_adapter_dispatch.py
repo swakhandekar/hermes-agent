@@ -8,11 +8,26 @@ a future third channel will also go through.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from gateway.config import Platform, PlatformConfig
 
 from plugins.platforms.twilio import adapter
 from plugins.platforms.twilio.channels.email import EmailChannel
 from plugins.platforms.twilio.channels.rcs import RcsChannel
+
+
+class _AsyncCM:
+    """Minimal async context manager returning a fixed value."""
+
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
 
 
 def test_phone_number_routes_to_rcs_channel():
@@ -104,3 +119,58 @@ def test_standalone_send_forwards_arbitrary_kwargs_to_the_channel(monkeypatch):
     assert "media_files" in captured
     assert "force_document" in captured
     assert "thread_id" in captured
+
+
+def test_live_adapter_path_forwards_media_files_to_email_send(monkeypatch, tmp_path):
+    """Regression test: when a live gateway adapter is connected (the
+    common case for cron, which runs inside the gateway's own process),
+    tools.send_message_tool._send_via_adapter must forward media_files
+    into metadata so EmailChannel.send() can attach a MEDIA:<path> file.
+    Previously this was silently dropped — the send reported success with
+    no attachment and no error."""
+    import tools.send_message_tool as smt
+
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtestsid")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "testtoken")
+    monkeypatch.setenv("TWILIO_EMAIL_FROM", "sender@example.com")
+
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+
+    live_adapter = adapter.TwilioAdapter(PlatformConfig())
+
+    mock_resp = MagicMock()
+    mock_resp.status = 202
+    mock_resp.json = AsyncMock(return_value={"operationId": "op789"})
+    mock_session = MagicMock()
+    mock_session.close = AsyncMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    class FakeRunner:
+        adapters = {Platform("twilio"): live_adapter}
+
+    with (
+        patch("gateway.run._gateway_runner_ref", return_value=FakeRunner()),
+        patch("aiohttp.ClientSession", return_value=mock_session),
+    ):
+        result = asyncio.run(
+            smt._send_via_adapter(
+                Platform("twilio"),
+                MagicMock(extra={}),
+                "customer@example.com",
+                "Report attached",
+                thread_id=None,
+                media_files=[(str(f), False)],
+                force_document=False,
+            )
+        )
+
+    assert result.get("success") is True
+    sent_attachments = captured["payload"]["content"]["attachments"]
+    assert sent_attachments[0]["filename"] == "report.pdf"

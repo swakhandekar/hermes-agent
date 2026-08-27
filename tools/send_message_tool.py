@@ -847,6 +847,12 @@ async def _send_via_adapter(
          ``PlatformEntry`` (used when the gateway is not in this process, so
          the runner weakref is ``None``).
       3. A descriptive error explaining both options.
+
+    ``media_files``/``force_document`` are forwarded into ``metadata`` for
+    path (1), same as ``thread_id``/``publish_topic`` — ``adapter.send()``
+    has no dedicated ``media_files`` param, so this is the only way a
+    plugin's ``send()`` can see a ``MEDIA:<path>`` attachment when a live
+    adapter is connected (the common case for cron, which runs in-process).
     """
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner = None
@@ -868,6 +874,10 @@ async def _send_via_adapter(
                     metadata["thread_id"] = thread_id
                 if platform_name == "ntfy" and chat_id:
                     metadata["publish_topic"] = chat_id
+                if media_files:
+                    metadata["media_files"] = media_files
+                if force_document:
+                    metadata["force_document"] = force_document
                 if not metadata:
                     metadata = None
                 result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
