@@ -222,6 +222,7 @@ class EmailChannel(Channel):
         *,
         html: bool = False,
         attachments: Optional[List[Dict[str, str]]] = None,
+        schedule_at: Optional[str] = None,
         session=None,
     ) -> Dict[str, Any]:
         """Shared POST + response handling for send()/send_image()/
@@ -263,6 +264,10 @@ class EmailChannel(Channel):
             "to": [{"address": chat_id}],
             "content": content,
         }
+        if schedule_at:
+            # API takes an array but only honors the first entry (confirmed
+            # in the docs) -- a single-element list, not a bare string.
+            payload["schedule"] = {"sendAt": [schedule_at]}
 
         owns_session = session is None
         session = session or aiohttp.ClientSession(
@@ -354,7 +359,13 @@ class EmailChannel(Channel):
                 return {"success": False, "error": attach_error}
 
         return await self._post_email(
-            chat_id, subject, body, html=html, attachments=attachments, session=session
+            chat_id,
+            subject,
+            body,
+            html=html,
+            attachments=attachments,
+            schedule_at=meta.get("schedule_at"),
+            session=session,
         )
 
     async def send_image(
@@ -450,7 +461,10 @@ class EmailChannel(Channel):
         """Out-of-process delivery for `hermes send`/cron when no live
         gateway adapter exists. `media_files` (via **kwargs) attaches
         MEDIA:<path> files; `force_document` has no effect -- email
-        attachments have no inline-vs-document distinction."""
+        attachments have no inline-vs-document distinction. `html` and
+        `schedule_at` mirror send()'s metadata options -- no caller
+        threads them through yet (no CLI flag), but this keeps the two
+        paths at parity instead of silently diverging."""
         import aiohttp
 
         from gateway.platforms.base import proxy_kwargs_for_aiohttp, resolve_proxy_url
@@ -466,6 +480,8 @@ class EmailChannel(Channel):
                 )
             }
 
+        html = bool(kwargs.get("html"))
+        schedule_at = kwargs.get("schedule_at")
         subject, body = _split_subject_and_body(message)
         subject = _sanitize_subject(subject)
 
@@ -488,11 +504,14 @@ class EmailChannel(Channel):
                 "Authorization": basic_auth_header(account_sid, auth_token),
                 "Content-Type": "application/json",
             }
-            content: Dict[str, Any] = {
-                "subject": subject,
-                "text": body,
-                "html": _plain_text_to_html(body),
-            }
+            if html:
+                content: Dict[str, Any] = {"subject": subject, "html": body}
+            else:
+                content = {
+                    "subject": subject,
+                    "text": body,
+                    "html": _plain_text_to_html(body),
+                }
             if attachments:
                 content["attachments"] = attachments
             payload: Dict[str, Any] = {
@@ -500,6 +519,8 @@ class EmailChannel(Channel):
                 "to": [{"address": chat_id}],
                 "content": content,
             }
+            if schedule_at:
+                payload["schedule"] = {"sendAt": [schedule_at]}
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30), **sess_kw
             ) as session:

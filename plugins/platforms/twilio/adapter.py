@@ -251,10 +251,12 @@ async def _standalone_send(
     thread_id=None,
     media_files=None,
     force_document=False,
+    **kwargs,
 ):
     """Out-of-process delivery for `hermes send`/cron when no live gateway
-    adapter exists. Forwards media_files/force_document/thread_id via
-    **kwargs — RCS ignores them, Email's uses media_files."""
+    adapter exists. Forwards every kwarg to the matched channel — RCS
+    ignores what it doesn't use, Email reads media_files/html/schedule_at
+    — so a channel-specific option never needs a signature change here."""
     channel = _channel_for_target(chat_id)
     if channel is None:
         return {
@@ -267,6 +269,7 @@ async def _standalone_send(
         thread_id=thread_id,
         media_files=media_files,
         force_document=force_document,
+        **kwargs,
     )
 
 

@@ -539,6 +539,112 @@ def test_standalone_send_always_includes_from_name_and_content_html(monkeypatch)
     assert captured["payload"]["content"]["html"]
 
 
+# ---------------------------------------------------------------------------
+# html and schedule_at parity between send() and standalone_send() -- a
+# caller passing these via metadata (send) or kwargs (standalone_send)
+# should get the same payload shape either way.
+
+
+def test_standalone_send_honors_html_kwarg(monkeypatch):
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-html"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **_kwargs):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=_AsyncCM(mock_session)):
+        asyncio.run(
+            channel.standalone_send(
+                None,
+                "customer@example.com",
+                "Subject\n<b>Raw HTML body</b>",
+                html=True,
+            )
+        )
+
+    content = captured["payload"]["content"]
+    assert content["html"] == "<b>Raw HTML body</b>"
+    assert "text" not in content
+
+
+def test_send_honors_schedule_at_metadata(monkeypatch):
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-sched"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        asyncio.run(
+            channel.send(
+                "customer@example.com",
+                "Subject\nBody",
+                metadata={"schedule_at": "2026-12-15T14:15:22Z"},
+            )
+        )
+
+    assert captured["payload"]["schedule"] == {"sendAt": ["2026-12-15T14:15:22Z"]}
+
+
+def test_standalone_send_honors_schedule_at_kwarg(monkeypatch):
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-sched2"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **_kwargs):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=_AsyncCM(mock_session)):
+        asyncio.run(
+            channel.standalone_send(
+                None,
+                "customer@example.com",
+                "Subject\nBody",
+                schedule_at="2026-12-15T14:15:22Z",
+            )
+        )
+
+    assert captured["payload"]["schedule"] == {"sendAt": ["2026-12-15T14:15:22Z"]}
+
+
+def test_send_without_schedule_at_omits_schedule_field(monkeypatch):
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-noschedule"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        asyncio.run(channel.send("customer@example.com", "Subject\nBody"))
+
+    assert "schedule" not in captured["payload"]
+
+
 def test_plain_text_to_html_escapes_and_converts_newlines():
     assert (
         email_channel._plain_text_to_html("Line one\nLine <two> & more")

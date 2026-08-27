@@ -7,6 +7,9 @@ a future third channel will also go through.
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, patch
+
 from plugins.platforms.twilio import adapter
 from plugins.platforms.twilio.channels.email import EmailChannel
 from plugins.platforms.twilio.channels.rcs import RcsChannel
@@ -71,3 +74,33 @@ def test_max_message_length_is_the_largest_across_channels():
         RcsChannel.max_message_length, EmailChannel.max_message_length
     )
     assert adapter._MAX_MESSAGE_LENGTH == EmailChannel.max_message_length
+
+
+def test_standalone_send_forwards_arbitrary_kwargs_to_the_channel(monkeypatch):
+    """A channel-specific option (e.g. Email's html/schedule_at) must reach
+    the channel without adapter.py needing a signature change for it."""
+    captured = {}
+
+    async def _fake_standalone_send(pconfig, chat_id, message, **kwargs):
+        captured.update(kwargs)
+        return {"success": True}
+
+    with patch.object(
+        EmailChannel, "standalone_send", AsyncMock(side_effect=_fake_standalone_send)
+    ):
+        asyncio.run(
+            adapter._standalone_send(
+                None,
+                "customer@example.com",
+                "hi",
+                html=True,
+                schedule_at="2026-12-15T14:15:22Z",
+            )
+        )
+
+    assert captured["html"] is True
+    assert captured["schedule_at"] == "2026-12-15T14:15:22Z"
+    # The three named kwargs still flow through too.
+    assert "media_files" in captured
+    assert "force_document" in captured
+    assert "thread_id" in captured

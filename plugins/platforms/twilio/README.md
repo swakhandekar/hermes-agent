@@ -189,6 +189,18 @@ or, for direct-Python callers only, `metadata={"attachments": [...]}`
 on `send()` — nothing in this repo actually calls `send()` with
 `metadata` today.
 
+**Scheduled send** — `metadata={"schedule_at": "<RFC 3339>"}` on
+`send()`, or `schedule_at="<RFC 3339>"` as a kwarg on
+`standalone_send()`, delays delivery. Twilio's API takes an array but
+only honors the first entry (confirmed in the docs), so this always
+sends a single-element list.
+
+**HTML** — `metadata={"html": True}` on `send()`, or `html=True` as a
+kwarg on `standalone_send()`, sends the body as raw HTML instead of
+plain text. Both paths now agree on this; there's still no `hermes
+send` CLI flag to set it, so today only a direct-Python caller, or one
+threading a kwarg through cron config, can actually reach it.
+
 **Async by design, not a delivery guarantee** — a successful call
 returns `202` with an `operationId`: accepted for processing, not
 confirmed delivered. This channel doesn't poll the Email Operation
@@ -197,11 +209,23 @@ back as the send's `message_id` for anyone who wants to check later.
 
 ### Known gaps (Email)
 
-No cc/bcc, no scheduled send (`schedule.sendAt`), no inline `cid` image
-references, no HTML via `hermes send`/cron (only via the direct-Python
-`metadata={"html": True}` escape hatch) — their exact request shapes
-either weren't confirmed against a live account or aren't wired up to
-any reachable caller yet.
+- **cc/bcc — not possible.** Confirmed absent from Twilio's documented
+  request schema; this isn't a gap in our code, the API doesn't have it.
+- **No inline `cid` image references.** Attachments support a `cid`
+  field, but using it needs a richer attachment-input shape (a way for
+  a caller to say *which* attachment is inline and what to name it)
+  threaded through every call site that builds one — a real design
+  change, not done here.
+- **No delivery confirmation.** Every send is fire-and-accept (`202` +
+  `operationId`); nothing here polls the Email Operation resource.
+  Actually confirming delivery means either blocking the caller for an
+  indeterminate time or adding a separate status-check command — a
+  design decision, not a quick addition.
+- **`TWILIO_EMAIL_HOME_CHANNEL` isn't wired into cron.** It exists on
+  `EmailChannel` for interface completeness, but Hermes core's
+  `cron_deliver_env_var` is one static slot per *platform*, currently
+  pointed at RCS's. Making cron pick the right slot per channel needs a
+  change in core Hermes (`cron/scheduler.py`), not just this plugin.
 
 **Two payload quirks confirmed live, contradicting the docs** (see
 `channels/email.py` for detail): `from.name` must always be present, or
