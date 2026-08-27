@@ -1,42 +1,30 @@
 """Email channel for the Twilio plugin.
 
-Sends through Twilio's Email API (One Console, ``comms.twilio.com``) --
-not the older SendGrid ``api.sendgrid.com`` v3 Mail Send API. Auth is the
-same ``TWILIO_ACCOUNT_SID``/``TWILIO_AUTH_TOKEN`` every other channel
-uses, via ``core/credentials.py`` -- not a separate SendGrid key.
+Uses Twilio's Email API (One Console, ``comms.twilio.com``), not the
+older SendGrid v3 Mail Send API. Auth: the same ``TWILIO_ACCOUNT_SID``/
+``TWILIO_AUTH_TOKEN`` every channel uses (``core/credentials.py``), not
+a SendGrid key. Docs: https://www.twilio.com/docs/email/api/overview
 
-Docs: https://www.twilio.com/docs/email/api/overview
+Implements ``Channel`` directly (not ``MessagingChannel``) -- JSON body,
+async 202 + ``operationId``, nothing like the other channels' transport.
 
-Implements ``Channel`` directly, not ``MessagingChannel``: its
-request/response shape (JSON body, async 202 + ``operationId``) has
-nothing to do with the Messages.json resource other channels use.
-
-Subject/body: the first line of `content` is the subject, the rest is
-the body -- single-line content gets a generic default subject. Override
-via `metadata={"subject": ..., "html": True, "attachments": [...]}`.
-
-**Async, not a delivery guarantee.** A 202 + ``operationId`` means
-accepted for processing, not delivered. Not polled here; ``operationId``
-comes back as ``message_id``.
+Subject/body: first line of `content` is the subject, rest is the body.
+Override via `metadata={"subject": ..., "html": True, "attachments": [...]}`.
 
 **Two quirks confirmed live, against the docs:** ``from.name`` must
-always be set, or the API returns a generic 'from' error that masks the
+always be set, or the API returns a generic 'from' error masking the
 real one (e.g. domain authorization); ``content.html`` is required even
-for plain text -- the docs describe generating ``text`` *from* ``html``,
-not the reverse.
+for plain text.
 
-Attachments: `send_image`/`send_document`/`send_multiple_images` (live)
-and `media_files` on `standalone_send` (`hermes send`/cron) attach local
-files as base64 in `content.attachments`. Remote image URLs are linked
-in the body, not downloaded -- matches the built-in `email` plugin.
+**Async, not delivered:** 202 + ``operationId`` means accepted, not
+delivered -- not polled here; ``operationId`` comes back as ``message_id``.
+
+Attachments (`send_image`/`send_document`/`send_multiple_images`, and
+`media_files` on `standalone_send`) go as base64 in
+`content.attachments`; remote image URLs are linked in the body, not
+downloaded.
 
 Known gaps: no cc/bcc, no scheduled send, no inline `cid` images.
-
-Unlike RCS, never splits into multiple sends -- an email is one document.
-
-Self-contained: nothing outside this file changes for Email behavior
-beyond `core/credentials.py`. Extract shared transport to `core/` only
-once a second consumer needs it.
 """
 
 import asyncio
