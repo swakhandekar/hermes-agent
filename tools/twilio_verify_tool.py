@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
 """Twilio Verify — send and check one-time verification codes (OTP).
 
-Use this as a human-confirmation gate before an irreversible or high-stakes
-agent action: call ``action="start"`` to send a code to a phone number,
-email address, or WhatsApp number, then call ``action="check"`` with the
-code the human reports back in the conversation to confirm they actually
-approved. A ``check`` result with ``status="approved"`` means the code
-matched; anything else means it didn't (wrong code, expired, or no
-verification was ever started for that address).
+Human-confirmation gate for risky agent actions: ``action="start"`` sends
+a code to a phone/email/WhatsApp target; ``action="check"`` verifies a
+code the human reports back. ``status="approved"`` means it matched.
 
-Off by default — opt in via the ``twilio_verify`` toolset (``hermes
-tools``), since a ``start`` call sends a real SMS/call/email/WhatsApp
-message to a real person and shouldn't be something every agent session
-can trigger silently.
+Off by default -- opt in via the ``twilio_verify`` toolset (``hermes
+tools``), since ``start`` sends a real message to a real person.
 
 Env vars:
-  - TWILIO_ACCOUNT_SID        (shared with the sms/twilio platform plugins)
-  - TWILIO_AUTH_TOKEN         (shared with the sms/twilio platform plugins)
-  - TWILIO_VERIFY_SERVICE_SID (starts with VA -- create once in the Twilio
-                                Console under Verify > Services; tools have
-                                no interactive setup wizard here, so this is
-                                a manual ~/.hermes/.env step)
+  - TWILIO_ACCOUNT_SID        (shared with the sms/twilio plugins)
+  - TWILIO_AUTH_TOKEN         (shared with the sms/twilio plugins)
+  - TWILIO_VERIFY_SERVICE_SID (create once in Twilio Console > Verify >
+                                Services; tools have no setup wizard, so
+                                add it to ~/.hermes/.env manually)
 
-Twilio's own VerificationCheck endpoint matches a pending verification by
-the ``to`` value alone -- no verification SID needs to be threaded through
-by the caller between the two calls, so this tool carries no state of its
-own between ``start`` and ``check``.
+No state carried between calls -- Twilio's VerificationCheck endpoint
+matches a pending verification by ``to`` alone.
 
-The ``email``/``whatsapp`` channels may need one-time setup of their own in
-the Verify Service's Twilio Console settings (an email integration, or
-WhatsApp Business approval) beyond the env vars above -- not covered here.
+Note: email/whatsapp channels may need their own one-time setup in the
+Verify Service's Console settings, beyond the env vars above.
 """
 
 import base64
@@ -51,10 +41,8 @@ _VALID_CHANNELS = ("sms", "call", "email", "whatsapp")
 
 
 def _get_scoped_secret(name, default=None):
-    """Scope-aware credential read with the default-profile startup fallback.
-
-    Mirrors plugins/platforms/sms/adapter.py::_get_scoped_secret.
-    """
+    """Scope-aware credential read; falls back to os.environ for the default
+    profile. Mirrors plugins/platforms/sms/adapter.py::_get_scoped_secret."""
     try:
         val = _scoped_get_secret(name, default)
     except _UnscopedSecretError:
@@ -63,10 +51,8 @@ def _get_scoped_secret(name, default=None):
 
 
 def _basic_auth_header(account_sid: str, auth_token: str) -> str:
-    """Build the HTTP Basic auth header value for Twilio.
-
-    Mirrors plugins/platforms/sms/adapter.py::SmsAdapter._basic_auth_header.
-    """
+    """Build the HTTP Basic auth header value for Twilio. Mirrors
+    plugins/platforms/sms/adapter.py::SmsAdapter._basic_auth_header."""
     creds = f"{account_sid}:{auth_token}".encode("ascii")
     return f"Basic {base64.b64encode(creds).decode('ascii')}"
 
@@ -164,14 +150,11 @@ def twilio_verify_tool(
 TWILIO_VERIFY_SCHEMA = {
     "name": "twilio_verify",
     "description": (
-        "Send or check a one-time verification code via Twilio Verify. Use this "
-        "as a human-confirmation gate BEFORE executing an irreversible or "
-        "high-stakes action -- call action='start' to send a code to the "
-        "human's phone/email/WhatsApp, then call action='check' with the code "
-        "they report back in the conversation to confirm they actually "
-        "approved. A 'check' result with status='approved' means the code "
-        "matched; anything else means it didn't (wrong code, expired, or no "
-        "verification was ever started for that address)."
+        "Send or check a one-time verification code via Twilio Verify -- a "
+        "human-confirmation gate before risky actions. action='start' sends a "
+        "code to the human's phone/email/WhatsApp; action='check' verifies the "
+        "code they report back. status='approved' means it matched; anything "
+        "else means it didn't (wrong code, expired, or none was ever sent)."
     ),
     "parameters": {
         "type": "object",
