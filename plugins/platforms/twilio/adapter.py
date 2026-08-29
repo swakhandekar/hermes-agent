@@ -122,6 +122,16 @@ class TwilioAdapter(BasePlatformAdapter):
                 error=f"'{chat_id}' is not a valid target for any configured Twilio channel",
             )
 
+        # Same reconciliation as _standalone_send: html/subject arrive via
+        # metadata here, and RCS would silently ignore both.
+        if metadata and (metadata.get("html") or metadata.get("subject")):
+            metadata = dict(metadata)
+            content, option_error = _apply_channel_send_options(
+                channel, content, metadata
+            )
+            if option_error:
+                return SendResult(success=False, error=option_error)
+
         owns_session = self._http_session is None
         session = self._http_session
         if owns_session:
@@ -243,6 +253,31 @@ class TwilioAdapter(BasePlatformAdapter):
         return content
 
 
+def _apply_channel_send_options(channel, message, options):
+    """Reconcile html/subject against the channel the target actually matched.
+
+    The registry entry declares the union across channels, so a phone-number
+    target reaches here with options only Email can honor. Mutates ``options``
+    in place, dropping what this channel would otherwise silently ignore.
+
+    Returns ``(message, error)`` -- a non-empty error means refuse the send.
+    """
+    if options.get("html") and not channel.supports_html:
+        options.pop("html", None)
+        return message, (
+            f"Twilio {channel.name} does not support HTML bodies -- --html "
+            f"works on email targets (e.g. 'twilio:user@example.com')."
+        )
+    subject = options.get("subject") or ""
+    if subject and not channel.supports_subject:
+        # No subject field on this channel; a header line is the only way to
+        # carry the caller's intent, matching what core does for a platform
+        # with no subject concept at all.
+        options.pop("subject", None)
+        return f"{subject}\n\n{message.lstrip()}", None
+    return message, None
+
+
 async def _standalone_send(
     pconfig,
     chat_id,
@@ -262,6 +297,9 @@ async def _standalone_send(
         return {
             "error": f"'{chat_id}' is not a valid target for any configured Twilio channel"
         }
+    message, error = _apply_channel_send_options(channel, message, kwargs)
+    if error:
+        return {"error": error}
     return await channel.standalone_send(
         pconfig,
         chat_id,
@@ -298,14 +336,19 @@ def register(ctx) -> None:
         validate_target_ref_fn=validate_target_ref,
         standalone_sender_fn=_standalone_send,
         max_message_length=_MAX_MESSAGE_LENGTH,
+        # Both are Email-only capabilities; RCS ignores them. Declared at the
+        # platform level because the registry has no per-channel granularity —
+        # _channel_for_target() decides which channel actually sees them.
+        supports_html=True,
+        supports_subject=True,
         pii_safe=True,
         emoji="💬",
         allow_update_command=False,
         platform_hint=(
             "You are sending via Twilio. For a phone-number target: RCS with "
             "automatic SMS/MMS fallback, plain text only, no markdown. For an "
-            "email-address target: the first line of your message becomes the "
-            "subject, the rest becomes the body, plain text unless HTML is "
-            "explicitly requested."
+            "email-address target: plain text unless HTML is explicitly "
+            "requested, and unless a subject is supplied the first line of "
+            "your message becomes the subject and the rest becomes the body."
         ),
     )

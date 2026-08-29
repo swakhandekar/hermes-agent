@@ -138,6 +138,22 @@ class PlatformEntry:
     # Max message length for smart-chunking.  0 = no limit.
     max_message_length: int = 0
 
+    # ── Send options ──
+    # Whether this platform honors an ``html`` send option (body delivered as
+    # raw HTML instead of plain text).  Gates ``hermes send --html`` and the
+    # forwarding in ``tools/send_message_tool._send_via_adapter`` — the
+    # ``standalone_sender_fn`` contract below is a fixed keyword set, so
+    # passing ``html=`` to a platform that does not declare support would be a
+    # TypeError rather than a clean "not supported" error.
+    supports_html: bool = False
+
+    # Whether this platform honors a first-class ``subject`` send option (a
+    # real subject field, not a header line prepended to the body).  When
+    # False, ``tools/send_message_tool._handle_send`` falls back to prepending
+    # ``--subject`` to the message text, which is the only thing that means
+    # anything on a platform with no subject concept.
+    supports_subject: bool = False
+
     # ── Privacy ──
     # If True, session descriptions redact PII (phone numbers, etc.)
     pii_safe: bool = False
@@ -220,6 +236,11 @@ class PlatformEntry:
     # Signature:
     #     async (pconfig, chat_id, message, *, thread_id=None,
     #            media_files=None, force_document=False) -> dict
+    #
+    # A platform that sets ``supports_html`` / ``supports_subject`` above also
+    # receives ``html=`` / ``subject=``; accept ``**kwargs`` (or the named
+    # params) in that case.  They are never passed otherwise, so existing
+    # implementations keep the signature above unchanged.
     #
     # Returns ``{"success": True, "message_id": ...}`` on success or
     # ``{"error": str}`` on failure.  Plugin authors typically open an

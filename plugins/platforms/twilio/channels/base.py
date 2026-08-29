@@ -20,6 +20,14 @@ class Channel:
     required_env: List[str] = []
     cron_deliver_env_var: str = ""
 
+    # Per-channel send capabilities. The platform's registry entry declares
+    # the union of these (core has no per-channel granularity), so adapter.py
+    # re-checks against the channel the target actually matched -- otherwise
+    # an RCS target would silently ignore an --html body and silently drop a
+    # --subject, which is the class of bug this whole option exists to fix.
+    supports_html: bool = False
+    supports_subject: bool = False
+
     def check_requirements(self) -> bool:
         """Side-effect-free: are this channel's env vars set right now?"""
         raise NotImplementedError

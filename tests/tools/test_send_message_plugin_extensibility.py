@@ -269,3 +269,161 @@ print(json.dumps({"host_send": host_send, "cron": cron,
     assert payload["host_send"]["chat_id"] == "@alice@example.com"
     assert payload["cron"]["chat_id"] == "@alice@example.com"
     assert payload["model_registered"] is False
+
+
+# ---------------------------------------------------------------------------
+# First-class send options: html / subject / attachments
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def standalone_platform():
+    """A plugin platform delivering via standalone_sender_fn (the lane
+    `hermes send` uses when no gateway is running in-process)."""
+    name = "fmsg-opt-test"
+    seen: list[dict] = []
+
+    async def sender(pconfig, chat_id, message, **kwargs):
+        seen.append({"chat_id": chat_id, "message": message, "kwargs": dict(kwargs)})
+        return {"success": True, "platform": name, "chat_id": chat_id}
+
+    entry = PlatformEntry(
+        name=name,
+        label="Fixture Options",
+        adapter_factory=lambda cfg: None,
+        check_fn=lambda: True,
+        parse_target_ref_fn=lambda ref: (ref.strip().lower(), None),
+        standalone_sender_fn=sender,
+    )
+    platform_registry.register(entry)
+    try:
+        yield name, entry, seen
+    finally:
+        platform_registry.unregister(name)
+
+
+def _send(name, **extra):
+    _platform, _pconfig, config = _config_for(name)
+    with patch("gateway.config.load_gateway_config", return_value=config), \
+         patch("gateway.run._gateway_runner_ref", return_value=None), \
+         patch("tools.interrupt.is_interrupted", return_value=False), \
+         patch("gateway.mirror.mirror_to_session", return_value=True):
+        return json.loads(send_message_tool({
+            "target": f"{name}:@alice@example.com",
+            "message": extra.pop("message", "hello"),
+            **extra,
+        }))
+
+
+def test_html_on_unsupported_platform_is_a_clean_error(standalone_platform):
+    """--html must fail loudly rather than be silently dropped -- silently
+    dropping it is the original bug. It must also not reach the plugin, whose
+    standalone_sender_fn signature would raise TypeError."""
+    name, _entry, seen = standalone_platform
+
+    result = _send(name, html=True)
+
+    assert result.get("success") is not True
+    assert "does not support --html" in json.dumps(result)
+    assert seen == []
+
+
+def test_html_reaches_a_platform_that_declares_support(standalone_platform):
+    name, entry, seen = standalone_platform
+    entry.supports_html = True
+
+    document = "<!DOCTYPE html>\n<html><body>Hi</body></html>"
+    result = _send(name, message=document, html=True)
+
+    assert result["success"] is True
+    assert seen[-1]["kwargs"]["html"] is True
+    assert seen[-1]["message"] == document
+
+
+def test_subject_prepends_when_the_platform_has_no_subject_field(standalone_platform):
+    """A platform with no subject concept still gets the caller's intent as a
+    header line -- the behavior `hermes send` used to apply unconditionally."""
+    name, _entry, seen = standalone_platform
+
+    result = _send(name, subject="[CI]", message="build ok")
+
+    assert result["success"] is True
+    assert seen[-1]["message"] == "[CI]\n\nbuild ok"
+    assert "subject" not in seen[-1]["kwargs"]
+
+
+def test_subject_passes_through_when_the_platform_declares_support(
+    standalone_platform,
+):
+    name, entry, seen = standalone_platform
+    entry.supports_subject = True
+
+    result = _send(name, subject="Q3 report", message="body text")
+
+    assert result["success"] is True
+    assert seen[-1]["kwargs"]["subject"] == "Q3 report"
+    # Not also folded into the body -- that would duplicate it.
+    assert seen[-1]["message"] == "body text"
+
+
+def test_html_body_bypasses_media_extraction(standalone_platform, tmp_path):
+    """extract_media() deletes the MEDIA: spans it matches, and its maskers
+    only protect markdown constructs. An HTML document must reach the platform
+    byte-for-byte, so the scan is skipped entirely under html."""
+    name, entry, seen = standalone_platform
+    entry.supports_html = True
+
+    decoy = tmp_path / "logo.png"
+    decoy.write_bytes(b"\x89PNG")
+    document = f'<html><body><a href="MEDIA:{decoy}">x</a></body></html>'
+
+    result = _send(name, message=document, html=True)
+
+    assert result["success"] is True
+    assert seen[-1]["message"] == document, "HTML body was modified"
+    assert not seen[-1]["kwargs"].get("media_files")
+
+
+def test_media_extraction_still_applies_without_html(standalone_platform, tmp_path):
+    """The same body without --html keeps the existing MEDIA: behavior."""
+    name, _entry, seen = standalone_platform
+
+    real = tmp_path / "logo.png"
+    real.write_bytes(b"\x89PNG")
+
+    result = _send(name, message=f"see this MEDIA:{real}")
+
+    assert result["success"] is True
+    assert "MEDIA:" not in seen[-1]["message"]
+    assert [p for p, _ in seen[-1]["kwargs"]["media_files"]] == [str(real)]
+
+
+def test_explicit_attachment_rejection_is_reported_not_dropped(standalone_platform):
+    """filter_media_delivery_paths() warns and skips, which is right for a
+    MEDIA: tag an agent guessed at but wrong for a file the caller named."""
+    name, _entry, seen = standalone_platform
+
+    result = _send(name, attachments=["/nonexistent/nope.pdf"])
+
+    assert result.get("success") is not True
+    assert "Cannot attach" in json.dumps(result)
+    assert seen == []
+
+
+def test_delivered_attachments_are_not_reported_as_omitted(
+    standalone_platform, tmp_path
+):
+    """The 'MEDIA attachments were omitted' warning is driven by a hard-coded
+    platform list that predates plugin platforms having media support, so a
+    plugin platform that delivered its attachment fine still reported it
+    dropped. Now --attach on such a platform sends cleanly."""
+    name, _entry, seen = standalone_platform
+
+    doc = tmp_path / "q3.pdf"
+    doc.write_bytes(b"%PDF-1.4 fake")
+
+    result = _send(name, attachments=[str(doc)])
+
+    assert result["success"] is True
+    assert [p for p, _ in seen[-1]["kwargs"]["media_files"]] == [str(doc)]
+    assert "warnings" not in result, result.get("warnings")

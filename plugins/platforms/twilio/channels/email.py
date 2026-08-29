@@ -10,6 +10,9 @@ async 202 + ``operationId``, nothing like the other channels' transport.
 
 Subject/body: first line of `content` is the subject, rest is the body.
 Override via `metadata={"subject": ..., "html": True, "attachments": [...]}`.
+That first-line convention is plain-text only -- an HTML body is never
+split (it would eat the document's `<!DOCTYPE html>`), so an HTML send
+takes its subject from `subject` or falls back to the default.
 
 **Two quirks confirmed live, against the docs:** ``from.name`` must
 always be set, or the API returns a generic 'from' error masking the
@@ -24,7 +27,7 @@ Attachments (`send_image`/`send_document`/`send_multiple_images`, and
 `content.attachments`; remote image URLs are linked in the body, not
 downloaded.
 
-Known gaps: no cc/bcc, no scheduled send, no inline `cid` images.
+Known gaps: no cc/bcc, no inline `cid` images.
 """
 
 import asyncio
@@ -111,8 +114,68 @@ def _split_subject_and_body(content: str) -> Tuple[str, str]:
 
 def _plain_text_to_html(text: str) -> str:
     """Minimal plain-text -> HTML so a plain-text send has a non-empty
-    ``content.html`` -- see module docstring's quirks."""
-    return _html_lib.escape(text).replace("\n", "<br>\n")
+    ``content.html`` -- see module docstring's quirks.
+
+    ``white-space: pre-wrap`` preserves runs of spaces, so indented text,
+    aligned columns and log excerpts survive; ``<br>`` is emitted as well
+    (rather than relying on pre-wrap's own newline handling) so lines still
+    break in clients that strip inline styles. Only one of the two may
+    produce a break, hence ``<br>`` with no trailing newline -- emitting both
+    under pre-wrap would double-space every line."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    escaped = _html_lib.escape(normalized).replace("\n", "<br>")
+    return f'<div style="white-space:pre-wrap;">{escaped}</div>'
+
+
+def _resolve_subject_and_body(
+    content: str, *, explicit_subject: Any = None, html: bool = False
+) -> Tuple[str, str]:
+    """Decide the subject/body split for one send.
+
+    The first-line-is-the-subject convention is a plain-text affordance. On an
+    HTML body it silently eats the document's opening line (``<!DOCTYPE
+    html>``), so it is never applied there -- an HTML send takes its subject
+    from an explicit option or the default."""
+    if isinstance(explicit_subject, str) and explicit_subject:
+        return explicit_subject, content
+    if html:
+        return DEFAULT_SUBJECT, content
+    return _split_subject_and_body(content)
+
+
+def _build_email_content(
+    subject: str,
+    body: str,
+    *,
+    html: bool,
+    attachments: Optional[List[Dict[str, str]]] = None,
+    schedule_at: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Build ``content`` (and the optional ``schedule`` block) for the API.
+
+    Shared by send()/_post_email() and standalone_send() so the two paths
+    cannot drift -- they previously held byte-identical copies of this, which
+    is why ``html`` had to be implemented twice and was silently missing from
+    one of them for several commits."""
+    # content.html is required by the API (see module docstring's "payload
+    # quirks") -- a plain-text send needs an auto-derived html body too.
+    if html:
+        # No `text` part: Twilio derives one from `html`.
+        content: Dict[str, Any] = {"subject": subject, "html": body}
+    else:
+        content = {
+            "subject": subject,
+            "text": body,
+            "html": _plain_text_to_html(body),
+        }
+    if attachments:
+        content["attachments"] = attachments
+    schedule = None
+    if schedule_at:
+        # API takes an array but only honors the first entry (confirmed in the
+        # docs) -- a single-element list, not a bare string.
+        schedule = {"sendAt": [schedule_at]}
+    return content, schedule
 
 
 def _build_attachments(
@@ -167,12 +230,14 @@ async def _build_attachments_async(
 class EmailChannel(Channel):
     name = "email"
     max_message_length = MAX_EMAIL_LENGTH
+    supports_html = True
+    supports_subject = True
     required_env = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_EMAIL_FROM"]
     cron_deliver_env_var = "TWILIO_EMAIL_HOME_CHANNEL"
     platform_hint = (
-        "You are sending via Twilio Email. The first line of your message "
-        "becomes the subject; the rest becomes the body. Plain text unless "
-        "the caller explicitly requests HTML."
+        "You are sending via Twilio Email. Unless a subject is supplied, the "
+        "first line of your message becomes the subject and the rest becomes "
+        "the body. Plain text unless the caller explicitly requests HTML."
     )
 
     def _api_base(self) -> str:
@@ -246,28 +311,16 @@ class EmailChannel(Channel):
             "Authorization": basic_auth_header(account_sid, auth_token),
             "Content-Type": "application/json",
         }
-        # content.html is required by the API (see module docstring's
-        # "payload quirks") -- a plain-text send needs an auto-derived html
-        # body too.
-        if html:
-            content: Dict[str, Any] = {"subject": subject, "html": body}
-        else:
-            content = {
-                "subject": subject,
-                "text": body,
-                "html": _plain_text_to_html(body),
-            }
-        if attachments:
-            content["attachments"] = attachments
+        content, schedule = _build_email_content(
+            subject, body, html=html, attachments=attachments, schedule_at=schedule_at
+        )
         payload: Dict[str, Any] = {
             "from": {"address": from_email, "name": from_name or DEFAULT_FROM_NAME},
             "to": [{"address": chat_id}],
             "content": content,
         }
-        if schedule_at:
-            # API takes an array but only honors the first entry (confirmed
-            # in the docs) -- a single-element list, not a bare string.
-            payload["schedule"] = {"sendAt": [schedule_at]}
+        if schedule:
+            payload["schedule"] = schedule
 
         owns_session = session is None
         session = session or aiohttp.ClientSession(
@@ -342,12 +395,10 @@ class EmailChannel(Channel):
         session=None,
     ) -> Dict[str, Any]:
         meta = metadata or {}
-        explicit_subject = meta.get("subject")
         html = bool(meta.get("html"))
-        if isinstance(explicit_subject, str) and explicit_subject:
-            subject, body = explicit_subject, content
-        else:
-            subject, body = _split_subject_and_body(content)
+        subject, body = _resolve_subject_and_body(
+            content, explicit_subject=meta.get("subject"), html=html
+        )
 
         # Two attachment conventions land here: `attachments` (bare paths,
         # for a direct-Python caller) and `media_files` ((path, is_voice)
@@ -467,10 +518,9 @@ class EmailChannel(Channel):
         """Out-of-process delivery for `hermes send`/cron when no live
         gateway adapter exists. `media_files` (via **kwargs) attaches
         MEDIA:<path> files; `force_document` has no effect -- email
-        attachments have no inline-vs-document distinction. `html` and
-        `schedule_at` mirror send()'s metadata options -- no caller
-        threads them through yet (no CLI flag), but this keeps the two
-        paths at parity instead of silently diverging."""
+        attachments have no inline-vs-document distinction. `html`,
+        `subject` and `schedule_at` mirror send()'s metadata options;
+        `hermes send` reaches the first two via `--html`/`--subject`."""
         import aiohttp
 
         from gateway.platforms.base import proxy_kwargs_for_aiohttp, resolve_proxy_url
@@ -488,7 +538,9 @@ class EmailChannel(Channel):
 
         html = bool(kwargs.get("html"))
         schedule_at = kwargs.get("schedule_at")
-        subject, body = _split_subject_and_body(message)
+        subject, body = _resolve_subject_and_body(
+            message, explicit_subject=kwargs.get("subject"), html=html
+        )
         subject = _sanitize_subject(subject)
 
         media_files = kwargs.get("media_files")
@@ -510,23 +562,20 @@ class EmailChannel(Channel):
                 "Authorization": basic_auth_header(account_sid, auth_token),
                 "Content-Type": "application/json",
             }
-            if html:
-                content: Dict[str, Any] = {"subject": subject, "html": body}
-            else:
-                content = {
-                    "subject": subject,
-                    "text": body,
-                    "html": _plain_text_to_html(body),
-                }
-            if attachments:
-                content["attachments"] = attachments
+            content, schedule = _build_email_content(
+                subject,
+                body,
+                html=html,
+                attachments=attachments,
+                schedule_at=schedule_at,
+            )
             payload: Dict[str, Any] = {
                 "from": {"address": from_email, "name": from_name or DEFAULT_FROM_NAME},
                 "to": [{"address": chat_id}],
                 "content": content,
             }
-            if schedule_at:
-                payload["schedule"] = {"sendAt": [schedule_at]}
+            if schedule:
+                payload["schedule"] = schedule
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30), **sess_kw
             ) as session:

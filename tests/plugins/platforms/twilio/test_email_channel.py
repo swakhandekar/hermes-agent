@@ -600,11 +600,111 @@ def test_standalone_send_honors_html_kwarg(monkeypatch):
                 "customer@example.com",
                 "Subject\n<b>Raw HTML body</b>",
                 html=True,
+                subject="Explicit subject",
             )
         )
 
     content = captured["payload"]["content"]
-    assert content["html"] == "<b>Raw HTML body</b>"
+    # The whole message is the body -- an HTML send is never first-line-split.
+    assert content["html"] == "Subject\n<b>Raw HTML body</b>"
+    assert content["subject"] == "Explicit subject"
+    assert "text" not in content
+
+
+def test_html_send_never_splits_the_first_line_into_the_subject(monkeypatch):
+    """The first-line-is-the-subject convention is plain-text only. Applying
+    it to a document eats the opening <!DOCTYPE html> and corrupts the markup
+    -- the original bug behind `hermes send --file page.html`."""
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-doc"})
+    mock_session = MagicMock()
+    captured = {}
+
+    document = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head><meta charset=\"UTF-8\"><title>Notice</title></head>\n"
+        '<body style="margin:0;padding:0;">\n'
+        "<table role=\"presentation\"><tr><td>Hello</td></tr></table>\n"
+        "</body>\n</html>"
+    )
+
+    def _capturing_post(url, json=None, headers=None, **_kwargs):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=_AsyncCM(mock_session)):
+        asyncio.run(
+            channel.standalone_send(
+                None,
+                "customer@example.com",
+                document,
+                html=True,
+                subject="Official Notice",
+            )
+        )
+
+    content = captured["payload"]["content"]
+    assert content["html"] == document, "HTML body must survive byte-for-byte"
+    assert content["html"].startswith("<!DOCTYPE html>")
+    assert content["subject"] == "Official Notice"
+
+
+def test_html_send_without_subject_falls_back_to_default(monkeypatch):
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-nosub"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **_kwargs):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=_AsyncCM(mock_session)):
+        asyncio.run(
+            channel.standalone_send(
+                None, "customer@example.com", "<h1>Hi</h1>\n<p>Body</p>", html=True
+            )
+        )
+
+    content = captured["payload"]["content"]
+    assert content["html"] == "<h1>Hi</h1>\n<p>Body</p>"
+    assert content["subject"] == email_channel.DEFAULT_SUBJECT
+
+
+def test_send_honors_html_metadata_end_to_end(monkeypatch):
+    """send()'s metadata form, the live-adapter path -- previously only the
+    standalone_send() kwarg form was asserted."""
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+    mock_resp = _mock_response(202, json_body={"operationId": "op-meta"})
+    mock_session = MagicMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **_kwargs):
+        captured["payload"] = json
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    asyncio.run(
+        channel.send(
+            "customer@example.com",
+            "<!DOCTYPE html>\n<html><body>Hi</body></html>",
+            metadata={"html": True, "subject": "Report"},
+            session=mock_session,
+        )
+    )
+
+    content = captured["payload"]["content"]
+    assert content["html"] == "<!DOCTYPE html>\n<html><body>Hi</body></html>"
+    assert content["subject"] == "Report"
     assert "text" not in content
 
 
@@ -683,8 +783,29 @@ def test_send_without_schedule_at_omits_schedule_field(monkeypatch):
 def test_plain_text_to_html_escapes_and_converts_newlines():
     assert (
         email_channel._plain_text_to_html("Line one\nLine <two> & more")
-        == "Line one<br>\nLine &lt;two&gt; &amp; more"
+        == '<div style="white-space:pre-wrap;">'
+        "Line one<br>Line &lt;two&gt; &amp; more</div>"
     )
+
+
+def test_plain_text_to_html_preserves_indentation_and_columns():
+    """Without a whitespace-preserving container, indented text and aligned
+    columns collapse -- log excerpts and ASCII tables arrive unreadable."""
+    rendered = email_channel._plain_text_to_html("name    qty\n  foo      3")
+    assert "white-space:pre-wrap" in rendered
+    # Runs of spaces survive verbatim rather than collapsing to one.
+    assert "name    qty" in rendered
+    assert "  foo      3" in rendered
+
+
+def test_plain_text_to_html_normalizes_crlf_and_bare_cr():
+    """A CR-only body would otherwise render as one unbroken line, since only
+    \\n was converted to <br>."""
+    for text in ("a\r\nb", "a\rb", "a\nb"):
+        assert (
+            email_channel._plain_text_to_html(text)
+            == '<div style="white-space:pre-wrap;">a<br>b</div>'
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ For rich RCS content, add a `CONTENT:` directive (see "Rich content"
 below). Don't fabricate a raw JSON card payload — Twilio's Messages API
 only accepts a `ContentSid` referencing a template created ahead of
 time. For an email attachment, use the standard `MEDIA:<path>`
-convention (see "Sending email" below) — same mechanism every platform
-in this repo uses, not something Email-specific.
+convention or `--attach` (see "Sending email" below) — same mechanism
+every platform in this repo uses, not something Email-specific.
 
 ## Setup
 
@@ -164,9 +164,12 @@ inbound webhook).
 ```bash
 hermes send --to "twilio:customer@example.com" $'Order shipped\nYour package is on its way.'
 
-# with an attachment — same MEDIA:<path> convention every platform uses
+# with an attachment — either the MEDIA:<path> convention every platform
+# uses, or --attach, which never modifies the body
 hermes send --to "twilio:customer@example.com" "Report attached
 MEDIA:/path/to/report.pdf"
+hermes send --to "twilio:customer@example.com" "Report attached" \
+  --attach /path/to/report.pdf
 ```
 
 Bare email-address targets, same `parse_target_ref_fn`/`validate_target_ref_fn`
@@ -176,9 +179,14 @@ mechanism as RCS's phone numbers.
 `content` string with no subject concept. By convention: the **first
 line of `content` is the subject**, the remainder is the body. A
 single-line message gets a generic default subject
-("Message from Hermes Agent"). A `--subject` CLI flag also works —
-`hermes_cli/send_cmd.py` prepends it onto the body with a blank line,
-landing on this same first-line convention, not a separate code path.
+("Message from Hermes Agent").
+
+`--subject` takes precedence over that convention and leaves the body
+untouched. It is a first-class send option, not a body prefix: the
+platform declares `supports_subject`, and `_handle_send` falls back to
+prepending a header line only for platforms with no subject field at
+all. The first-line split is skipped entirely for `--subject` and for
+`--html` (see "HTML" below).
 
 **Attachments** — local files are attached directly (base64, inline in
 the request; ~7 MB cap, headroom under the API's 10 MB total-request
@@ -192,7 +200,10 @@ process itself has a scheduler — see `tools/send_message_tool.py`'s
 `_send_via_adapter` for how it gets there). Both read the same
 `(path, is_voice)` tuple-list shape. A direct-Python caller can also
 pass bare paths via `metadata={"attachments": [...]}` on `send()`; both
-keys are additive.
+keys are additive. `hermes send --attach PATH` (repeatable) feeds the
+same `media_files` list without putting a tag in the body — the only
+way to attach a file alongside `--html`, and unlike a `MEDIA:` tag a
+rejected path is reported rather than logged and skipped.
 
 **Scheduled send** — `metadata={"schedule_at": "<RFC 3339>"}` on
 `send()`, or `schedule_at="<RFC 3339>"` as a kwarg on
@@ -200,11 +211,34 @@ keys are additive.
 only honors the first entry (confirmed in the docs), so this always
 sends a single-element list.
 
-**HTML** — `metadata={"html": True}` on `send()`, or `html=True` as a
-kwarg on `standalone_send()`, sends the body as raw HTML instead of
-plain text. Both paths now agree on this; there's still no `hermes
-send` CLI flag to set it, so today only a direct-Python caller, or one
-threading a kwarg through cron config, can actually reach it.
+**HTML** — `hermes send --html`, `metadata={"html": True}` on
+`send()`, or `html=True` as a kwarg on `standalone_send()`, sends the
+body as raw HTML instead of plain text. All three paths agree.
+
+```
+hermes send --to twilio:a@b.com --subject "Q3" --file report.html --html
+hermes send --to twilio:a@b.com --file body.html --html --attach q3.pdf
+```
+
+HTML is never inferred — a `.html` file sent *without* the flag is
+delivered as escaped, visible source text, which is what the plain-text
+path is for. Two things follow from `--html` that plain text does not
+get:
+
+- **The body is never first-line-split.** The subject comes from
+  `--subject`/`metadata["subject"]`, falling back to the default. The
+  first-line-is-the-subject convention is a plain-text affordance; on a
+  document it would eat the opening `<!DOCTYPE html>`.
+- **The body is transmitted byte-for-byte.** `MEDIA:<path>` tags are
+  not scanned for (core's extractor deletes what it matches, and only
+  masks markdown constructs — an HTML document gets no protection), and
+  the body is never chunked. Use `--attach PATH` (repeatable) for
+  attachments; it never touches the body and works on any platform.
+
+Declared to core via `supports_html`/`supports_subject` on the
+platform's registry entry, which is what gates `--html` into a clean
+"not supported" error elsewhere instead of a `TypeError` against
+another plugin's `standalone_sender_fn` signature.
 
 **Async by design, not a delivery guarantee** — a successful call
 returns `202` with an `operationId`: accepted for processing, not
