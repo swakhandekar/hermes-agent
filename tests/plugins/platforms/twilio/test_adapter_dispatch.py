@@ -1,9 +1,4 @@
-"""Tests for channel dispatch in plugins/platforms/twilio/adapter.py.
-
-RCS and Email are both registered; these tests cover the generic
-target-format dispatch mechanism (_channel_for_target and friends) that
-a future third channel will also go through.
-"""
+"""Tests for channel dispatch in plugins/platforms/twilio/adapter.py."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from gateway.config import Platform, PlatformConfig
 from plugins.platforms.twilio import adapter
 from plugins.platforms.twilio.channels.email import EmailChannel
 from plugins.platforms.twilio.channels.rcs import RcsChannel
-
+from plugins.platforms.twilio.channels.voice import VoiceChannel
 
 class _AsyncCM:
     """Minimal async context manager returning a fixed value."""
@@ -40,11 +35,16 @@ def test_email_address_routes_to_email_channel():
     assert isinstance(channel, EmailChannel)
 
 
+def test_voice_prefixed_target_routes_to_voice_channel():
+    channel = adapter._channel_for_target("voice:+15551234567")
+    assert isinstance(channel, VoiceChannel)
+
+
 def test_garbage_target_matches_no_channel():
     assert adapter._channel_for_target("not-a-target") is None
 
 
-def test_parse_target_ref_dispatches_phone_to_rcs():
+def test_parse_target_ref_dispatches_bare_phone_to_rcs():
     assert adapter.parse_target_ref("+15551234567") == ("+15551234567", None)
 
 
@@ -55,12 +55,17 @@ def test_parse_target_ref_dispatches_email_to_email_channel():
     )
 
 
+def test_parse_target_ref_dispatches_voice_prefix_to_voice():
+    assert adapter.parse_target_ref("voice:+15551234567") == ("voice:+15551234567", None)
+
+
 def test_parse_target_ref_rejects_unrecognized_format():
     assert adapter.parse_target_ref("not-a-target") is None
 
 
-def test_validate_target_ref_accepts_phone_number():
+def test_validate_target_ref_accepts_both_formats():
     assert adapter.validate_target_ref("+15551234567") is True
+    assert adapter.validate_target_ref("voice:+15551234567") is True
 
 
 def test_validate_target_ref_accepts_email_address():
@@ -71,13 +76,15 @@ def test_validate_target_ref_rejects_unrecognized_format():
     result = adapter.validate_target_ref("not-a-target")
     assert result != True  # noqa: E712 -- explicitly checking for the string diagnostic
     assert "phone number" in result
+    assert "voice:" in result
     assert "email address" in result
 
 
-def test_union_required_env_has_no_duplicates_and_covers_rcs_and_email():
+def test_union_required_env_has_no_duplicates_and_covers_rcs_voice_and_email():
     env_vars = adapter._union_required_env()
     assert len(env_vars) == len(set(env_vars))
     assert "TWILIO_MESSAGING_SERVICE_SID" in env_vars
+    assert "TWILIO_PHONE_NUMBER" in env_vars
     assert "TWILIO_EMAIL_FROM" in env_vars
     # Shared credentials appear once, not once per channel.
     assert env_vars.count("TWILIO_ACCOUNT_SID") == 1
@@ -86,8 +93,13 @@ def test_union_required_env_has_no_duplicates_and_covers_rcs_and_email():
 
 def test_max_message_length_is_the_largest_across_channels():
     assert adapter._MAX_MESSAGE_LENGTH == max(
-        RcsChannel.max_message_length, EmailChannel.max_message_length
+        RcsChannel.max_message_length,
+        VoiceChannel.max_message_length,
+        EmailChannel.max_message_length,
     )
+    # Email's 200_000 dwarfs RCS's 3072 and Voice's 3500, so it sets the
+    # platform-wide value core chunks by. See the README's note on what that
+    # means for a long `voice:` target.
     assert adapter._MAX_MESSAGE_LENGTH == EmailChannel.max_message_length
 
 
@@ -400,3 +412,4 @@ def test_live_adapter_refuses_html_on_an_rcs_target(monkeypatch):
     assert result.success is False
     assert "does not support HTML" in result.error
     rcs_send.assert_not_called()
+

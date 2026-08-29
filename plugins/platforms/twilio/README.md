@@ -1,19 +1,24 @@
 # Twilio platform plugin
 
 Outbound-only Hermes plugin for Twilio. Registered under one platform
-name (`"twilio"`), hosting two channels dispatched by target format:
+name (`"twilio"`), currently hosting three channels:
 
-- **RCS** — phone number target (`+15551234567`), sent via a Twilio
-  **Messaging Service** (`MessagingServiceSid`); Twilio auto-falls-back
-  to SMS/MMS for incapable recipients.
+- **RCS** — bare phone number target (`+15551234567`), sent via a
+  Twilio **Messaging Service** (`MessagingServiceSid`); Twilio
+  auto-falls-back to SMS/MMS for incapable recipients.
+- **Voice** — `voice:+15551234567` target (the prefix is required — see
+  "Channel dispatch"), places an outbound call via Twilio's Calls
+  resource and speaks the message (TwiML `<Say>`) or plays an audio URL
+  via a `PLAY:<url>` directive.
 - **Email** — email address target (`customer@example.com`), sent via
   Twilio's **Email API** (`comms.twilio.com`, One Console — not the
   older SendGrid `api.sendgrid.com` v3 Mail Send API). Uses the same
   core Twilio credentials as RCS, not a separate key.
 
-Built to host more channels (SMS, MMS, WhatsApp, Voice) over time —
-see "Architecture notes" for how to add one without touching an
-existing channel's code.
+Built to host more channels (SMS, MMS, WhatsApp) over time — see
+"Architecture notes" for how to add one without touching an existing
+channel's code. (The `Channel`/`MessagingChannel` split below was shaped
+by the Email and Voice work, both of which needed their own transport.)
 
 Note: the built-in `sms` platform (`plugins/platforms/sms/`) also talks
 to Twilio and is independent of this plugin; they only overlap in
@@ -47,16 +52,22 @@ every platform in this repo uses, not something Email-specific.
 
 ## Setup
 
+Only one channel needs to be fully configured — RCS and Voice don't
+depend on each other's vars, though both share `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`.
+
 | Env var | Required | Notes |
 |---|---|---|
-| `TWILIO_ACCOUNT_SID` | yes | Starts with `AC` — shared with the built-in `sms` platform, `telephony` skill, and both channels here |
-| `TWILIO_AUTH_TOKEN` | yes | Shared the same way |
-| `TWILIO_MESSAGING_SERVICE_SID` | for RCS | Starts with `MG`, needs an RCS Sender attached |
-| `TWILIO_RCS_HOME_CHANNEL` | no | Destination E.164 number for cron `deliver=twilio` jobs (RCS) |
+| `TWILIO_ACCOUNT_SID` | yes | Starts with `AC` — shared with the built-in `sms` platform and `telephony` skill |
+| `TWILIO_AUTH_TOKEN` | yes | Shared with the built-in `sms` platform |
+| `TWILIO_MESSAGING_SERVICE_SID` | yes | Starts with `MG`, needs an RCS Sender attached |
+| `TWILIO_RCS_HOME_CHANNEL` | no | Destination E.164 number for cron `deliver=twilio` jobs |
+| `TWILIO_PHONE_NUMBER` | Voice only | Voice-capable Twilio number to call from — shared with the built-in `sms` platform |
+| `TWILIO_VOICE_TTS_VOICE` | no | Twilio TTS voice for `<Say>` (default: `Polly.Joanna`) |
 | `TWILIO_EMAIL_FROM` | for Email | Default sender — must be a verified sender identity for the Email product in the Twilio Console |
 | `TWILIO_EMAIL_FROM_NAME` | no | Sender display name (Email) |
 | `TWILIO_EMAIL_API_BASE` | no | Override the Email API base (default `https://comms.twilio.com/v1/Emails`) |
 | `TWILIO_EMAIL_HOME_CHANNEL` | no | Destination email address for cron `deliver=twilio` jobs (Email) — see "cron_deliver_env_var" caveat below |
+
 
 Add to `~/.hermes/.env`; verify with `hermes status` (`Twilio ✓
 configured (plugin)`). Only one channel needs to be configured for the
@@ -75,6 +86,34 @@ hardcoded phone-platform allowlist (`tools/send_message_tool._PHONE_PLATFORMS`).
 
 Markdown-stripped, chunked at `MAX_RCS_LENGTH` (3072 — Twilio's
 documented RCS limit; re-verify if messages start truncating).
+
+## Placing voice calls
+
+```bash
+# Speak the message via Twilio text-to-speech
+hermes send --to "twilio:voice:+15551234567" "Hello! Your order has shipped."
+
+# Play an audio file instead of speaking
+hermes send --to "twilio:voice:+15551234567" "PLAY:https://example.com/message.mp3"
+```
+
+The `voice:` prefix is **required** — a bare `+15551234567` target
+always means RCS (see "Channel dispatch"). Places one call via Twilio's
+Calls resource with inline TwiML (`Twiml` param, no webhook/TwiML Bin
+needed) — no `<Gather>`, digit-press, recording, or call-status
+polling; v1 is speak-or-play only.
+
+`PLAY:<url>` is this channel's own directive, matching RCS's `CONTENT:`
+convention — **not** Hermes's core `MEDIA:<path>` (a different,
+local-file mechanism resolved upstream before plugin adapters see the
+content string).
+
+Twilio's `Twiml` parameter has a **hard 4000-character cap** (confirmed
+against Twilio's docs). Content is XML-escaped and wrapped in
+`<Response><Say voice="...">...</Say></Response>`; if the built payload
+would exceed 4000 chars, the send fails with a clear character-count
+error rather than truncating silently or splitting into multiple calls.
+Empty content is refused before any Twilio API call.
 
 ## Rich content (cards, carousels)
 
@@ -279,7 +318,7 @@ reverse.
 Three layers so a new channel never touches another channel's code:
 
 - **`adapter.py`** — thin `BasePlatformAdapter` glue, no channel logic.
-  Holds `_CHANNELS = [RcsChannel(), EmailChannel()]`, dispatches to
+  Holds `_CHANNELS = [RcsChannel(), VoiceChannel(), EmailChannel()]`, dispatches to
   whichever matches the target format (`_channel_for_target()`). Also
   dispatches `send_image()`/`send_document()`/`send_multiple_images()`
   to the matched channel's own method when it has one (Email does; RCS
@@ -293,65 +332,99 @@ Three layers so a new channel never touches another channel's code:
     subclasses only need `format_message()` + `build_send_requests()`.
     `channels/rcs.py` is this shape.
 
-  A channel with its own transport (not Twilio's Messages.json resource
-  — Email, Voice) implements `Channel` directly instead and owns its
-  `send()`/`standalone_send()` from scratch. `channels/email.py` is
-  this shape — its whole POST/response-parsing/attachment-building
-  transport lives in that one file, since it's the only consumer of
-  that particular JSON/REST shape (extract to `core/` if a second one
-  ever needs it — not preemptively).
-- **`core/`** — shared across every channel: `credentials.py` (Account
-  SID/Auth Token, Basic Auth header, scoped-secret read) and
-  `messages_api.py` (the Messages.json POST loop — RCS/SMS/MMS/WhatsApp
-  only, not Email/Voice, which need their own transport).
+  `channels/voice.py` and `channels/email.py` implement `Channel`
+  directly, not `MessagingChannel` — neither uses Messages.json. Voice
+  owns its `send()`/`standalone_send()` via `core/calls_api.py`
+  (Calls.json); Email POSTs JSON to Twilio's Email API
+  (`comms.twilio.com/v1/Emails`) inline, since it is the only user of
+  that transport so far.
+- **`core/`** — shared transport, one module per Twilio resource:
+  `credentials.py` (Account SID/Auth Token, Basic Auth header, used by
+  all three channels), `messages_api.py` (Messages.json POST loop — RCS
+  today, reusable by SMS/MMS/WhatsApp), `calls_api.py` (Calls.json,
+  single-call POST — Voice). Email has no module here yet: it is the
+  sole user of the Email API, so its transport lives in the channel.
+  Pull it into `core/emails_api.py` when a second channel needs it.
 
 ### Channel dispatch
 
 Dispatch is by target format, decided in `adapter.py`
-(`_channel_for_target()`). RCS (E.164 phone numbers) and Email (email
-addresses) have mutually exclusive target shapes, so no disambiguation
-was needed adding the second channel — but keep this constraint in mind
-for the next one: SMS/MMS/WhatsApp would all *also* be phone-number
-targets, colliding with RCS's format. Format-sniffing only works while
-every channel's target shape is unique. Adding a same-shaped channel
-needs an explicit disambiguation scheme (e.g. a channel prefix) instead
-— decide deliberately, don't guess which channel a bare phone number
-"really" means.
+(`_channel_for_target()`):
+
+- `+15551234567` (bare E.164) → `RcsChannel`
+- `voice:+15551234567` → `VoiceChannel`
+
+Voice is the first real instance of the collision this section used to
+describe only hypothetically: Voice targets are phone numbers too, so a
+bare number can't mean both "text this number" and "call this number."
+The `voice:` prefix is the disambiguation — and critically, **the parsed
+chat_id keeps the prefix** (`VoiceChannel.parse_target_ref` returns
+`"voice:+15551234567"`, not the bare number) rather than stripping it.
+Hermes resolves `chat_id` once (via `parse_target_ref_fn`) and reuses
+that same value for every later call — `validate_target_ref_fn`,
+`send()`, `standalone_send()` — with no target_ref available at that
+point. If the prefix were stripped at parse time, a Voice chat_id would
+become indistinguishable from an RCS one exactly where it matters (the
+call to `_channel_for_target()` inside `send()`). Each channel's own
+`send()`/`standalone_send()` strips the prefix internally when it
+actually needs the bare number for Twilio's API (see
+`voice.py::_strip_prefix`). This mirrors an existing Hermes convention —
+Signal's `group:<id>` and Yuanbao's `direct:<id>`/`group:<id>` chat_id
+prefixes (`tools/send_message_tool.py`).
+
+A future SMS/MMS/WhatsApp channel would face the same collision with
+RCS and should use the same prefix-in-chat_id technique (or another
+scheme), not format-sniffing — decide deliberately, don't guess which
+channel a bare phone number "really" means.
 
 Other notes:
 
 - `connect()`/`check_requirements()`/`is_connected()` succeed if **any**
-  channel is ready — e.g. Email alone configured with no
-  `TWILIO_MESSAGING_SERVICE_SID` still connects.
+  channel is ready — a user configuring only Voice (or only RCS, or only
+  Email) shouldn't see the whole platform fail to start. Email alone,
+  with no `TWILIO_MESSAGING_SERVICE_SID`, still connects.
 - `_standalone_send()` is the primary path in practice — `hermes send`
-  and cron usually run in a separate process from any live gateway. It
-  forwards `media_files`/`force_document`/`thread_id` to whichever
-  channel's `standalone_send(pconfig, chat_id, message, **kwargs)` is
-  dispatched to; `MessagingChannel`'s ignores them via its own
-  `**kwargs`, Email's reads `media_files` for attachments.
-- `max_message_length` is registered as the largest across channels
-  (currently Email's 200,000, not RCS's 3,072) — matters because
-  `send_message_tool.py` pre-chunks by this single value before any
-  channel sees the content.
+  and cron usually run in a separate process from any live gateway.
+- `max_message_length` is registered as the largest across channels —
+  currently **Email's 200,000**, which dwarfs RCS's 3072 and Voice's
+  3500, because `send_message_tool.py` pre-chunks by this single value
+  before any channel sees the content.
+
+  Email's arrival changed what this means for Voice. While Voice set the
+  platform value at 3500, a longer message was split by Hermes's generic
+  chunker and `send()` was called once per chunk — placing **multiple
+  separate phone calls** for one logical message. At 200,000 that
+  chunking effectively never fires for a voice target, so the message
+  arrives whole and `VoiceChannel` rejects it cleanly if the built TwiML
+  exceeds Twilio's 4000-char cap (`_build_twiml`, "Message too long for
+  a single voice call"). One clear error beats a burst of phone calls,
+  so this is an accidental improvement rather than a regression — but it
+  is load-bearing on Email staying in `_CHANNELS`. Removing Email would
+  silently restore the multiple-calls behavior. `VoiceChannel` still
+  never chunks on its own (each `send()` places exactly one call) and
+  still cannot see chunking that happened one layer up in core Hermes.
 - `cron_deliver_env_var` is one static env var per platform in Hermes
   core (`cron/scheduler.py._resolve_home_env_var`) — no per-channel
-  hook. With two channels now, only RCS's `TWILIO_RCS_HOME_CHANNEL` is
-  wired into `register()`; `EmailChannel.cron_deliver_env_var`
-  (`TWILIO_EMAIL_HOME_CHANNEL`) exists on the class for interface
-  completeness but isn't reachable via cron yet — not solved
-  generically, same as before.
+  hook. With three channels, RCS keeps the single slot
+  (`TWILIO_RCS_HOME_CHANNEL`, wired in `register()`). Voice declares
+  none (`VoiceChannel.cron_deliver_env_var = ""`), and
+  `EmailChannel.cron_deliver_env_var` (`TWILIO_EMAIL_HOME_CHANNEL`)
+  exists on the class for interface completeness but isn't reachable
+  via cron. So `cron deliver=twilio` can only target RCS. Not solvable
+  here — it needs a core change to make the slot per-channel.
 
 ### Adding a new channel
 
 1. Create `channels/<name>.py`. Messages-API-based (SMS, MMS, WhatsApp):
    extend `MessagingChannel`, implement `format_message()` +
-   `build_send_requests()`. Own-transport (Voice, and Email already):
-   extend `Channel` directly.
-2. Don't edit `rcs.py`/`email.py` to do this — shared logic belongs in
-   `core/`.
-3. Add an instance to `_CHANNELS` in `adapter.py`. If its target format
-   could collide with an existing channel's, design explicit
-   disambiguation first (see "Channel dispatch").
+   `build_send_requests()`. Own-transport (Email, and anything else with
+   its own API): extend `Channel` directly like `channels/voice.py`.
+2. Don't edit `rcs.py`/`voice.py` to do this — shared logic belongs in `core/`.
+3. Add an instance to `_CHANNELS` in `adapter.py`. Its target format
+   will almost certainly collide with RCS's or Voice's (most Twilio
+   channels are phone-number-addressed) — design explicit
+   disambiguation first (see "Channel dispatch"), most likely a
+   prefix kept in the parsed chat_id, not stripped.
 4. Decide what to do about `cron_deliver_env_var` — not solved generically yet.
 5. If it needs attachment support beyond `send()`/`standalone_send()`
    (`send_image`/`send_document`/`send_multiple_images`), implement
@@ -368,11 +441,13 @@ twilio/
   adapter.py              # BasePlatformAdapter glue + channel dispatch
   core/
     credentials.py        # Account SID/Auth Token, Basic Auth header, scoped-secret read
-    messages_api.py       # shared POST loop against the Messages API resource (RCS/SMS/MMS/WhatsApp)
+    messages_api.py       # shared POST loop against the Messages API resource (RCS)
+    calls_api.py          # shared POST against the Calls API resource (Voice)
   channels/
     base.py                # Channel + MessagingChannel interfaces
     rcs.py                  # RCS — CONTENT: directive, E.164 targets, MAX_RCS_LENGTH
     email.py                 # Email — comms.twilio.com transport, attachments, subject/body convention
+    voice.py                # Voice — TwiML <Say>/<Play>, voice: prefix, PLAY: directive
   scripts/
     manage_content.py   # Content API template create/list/get helper
 ```

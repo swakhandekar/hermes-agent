@@ -3,17 +3,20 @@ label: Twilio
 kind: platform
 version: 1.0.0
 description: >
-  Outbound-only Twilio adapter for Hermes Agent, hosting two channels
-  dispatched by target format: RCS (phone number, via a Twilio Messaging
-  Service with an RCS Sender attached — Twilio automatically falls back
-  to SMS/MMS for incapable recipients) and Email (email address, via
-  Twilio's Email API). No inbound channel; use `hermes send` or cron
-  `deliver=twilio` to send. Built to host more channels (SMS, MMS,
-  WhatsApp, Voice) over time.
+  Outbound-only Twilio adapter for Hermes Agent, hosting multiple
+  channels under one platform. Currently implements RCS (sends through
+  a Twilio Messaging Service with an RCS Sender attached, falling back
+  to SMS/MMS automatically), Voice (places an outbound call and speaks
+  the message, or plays an audio URL) and Email (Twilio's Email API,
+  with optional HTML bodies and attachments). Target format picks the
+  channel: a bare phone number routes to RCS, a 'voice:+E.164' target
+  routes to Voice, an email address routes to Email. No inbound
+  channel; use `hermes send` or cron `deliver=twilio` to send. Built to
+  host more channels (SMS, MMS, WhatsApp) over time.
 
   Shares TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN with the built-in SMS
-  platform and the optional telephony skill — Email uses the same
-  credentials as RCS, not a separate key.
+  platform and the optional telephony skill. Only one channel needs to
+  be fully configured for this plugin to be useful.
 author: Hermes user
 requires_env:
   - name: TWILIO_ACCOUNT_SID
@@ -24,28 +27,39 @@ requires_env:
     description: "Twilio Auth Token — shared with the SMS platform"
     prompt: "Twilio Auth Token"
     password: true
+optional_env:
+  # RCS channel
   - name: TWILIO_MESSAGING_SERVICE_SID
-    description: "Messaging Service SID (starts with MG) with an approved RCS Sender attached — required for the RCS channel"
+    description: "[RCS] Messaging Service SID (starts with MG) with an approved RCS Sender attached"
     prompt: "Twilio Messaging Service SID"
     password: false
-  - name: TWILIO_EMAIL_FROM
-    description: "Default sender address for the Email channel — must be a verified sender identity for the Email product in the Twilio Console"
-    prompt: "Sender email address"
-    password: false
-optional_env:
   - name: TWILIO_RCS_HOME_CHANNEL
-    description: "Default destination phone number (E.164) for cron / notification delivery via RCS"
+    description: "[RCS] Default destination phone number (E.164) for cron / notification delivery"
     prompt: "Home channel phone number (or empty)"
     password: false
+  # Voice channel
+  - name: TWILIO_PHONE_NUMBER
+    description: "[Voice] Voice-capable Twilio phone number to call from — shared with the built-in SMS platform"
+    prompt: "Twilio phone number (E.164)"
+    password: false
+  - name: TWILIO_VOICE_TTS_VOICE
+    description: "[Voice] Twilio text-to-speech voice for <Say> (default: Polly.Joanna)"
+    prompt: "TTS voice name (or empty for default)"
+    password: false
+  # Email channel
+  - name: TWILIO_EMAIL_FROM
+    description: "[Email] Sender address — must be a verified sender identity for the Email product in the Twilio Console"
+    prompt: "Sender email address"
+    password: false
   - name: TWILIO_EMAIL_FROM_NAME
-    description: "Sender display name for the Email channel"
+    description: "[Email] Sender display name"
     prompt: "Sender display name (or empty)"
     password: false
   - name: TWILIO_EMAIL_API_BASE
-    description: "Override the Email API base (default https://comms.twilio.com/v1/Emails)"
+    description: "[Email] Override the API base (default https://comms.twilio.com/v1/Emails)"
     prompt: "API base override (or empty for the public default)"
     password: false
   - name: TWILIO_EMAIL_HOME_CHANNEL
-    description: "Default destination email address for cron / notification delivery via Email"
+    description: "[Email] Default destination address for cron / notification delivery"
     prompt: "Home channel email address (or empty)"
     password: false
