@@ -3,15 +3,19 @@ label: Twilio
 kind: platform
 version: 1.0.0
 description: >
-  Outbound-only Twilio adapter for Hermes Agent. Sends messages through
-  a Twilio Messaging Service with an RCS Sender attached — Twilio
-  automatically selects RCS for capable recipients and falls back to
-  SMS/MMS otherwise. No inbound channel; use `hermes send` or cron
+  Outbound-only Twilio adapter for Hermes Agent, hosting multiple
+  channels under one platform. Currently implements RCS (sends through
+  a Twilio Messaging Service with an RCS Sender attached, falling back
+  to SMS/MMS automatically) and Voice (places an outbound call and
+  speaks the message, or plays an audio URL). Target format picks the
+  channel: a bare phone number routes to RCS, a 'voice:+E.164' target
+  routes to Voice. No inbound channel; use `hermes send` or cron
   `deliver=twilio` to send. Built to host more channels (SMS, MMS,
-  WhatsApp, Voice, Email) over time.
+  WhatsApp, Email) over time.
 
   Shares TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN with the built-in SMS
-  platform and the optional telephony skill.
+  platform and the optional telephony skill. Only one channel needs to
+  be fully configured for this plugin to be useful.
 author: Hermes user
 requires_env:
   - name: TWILIO_ACCOUNT_SID
@@ -22,12 +26,22 @@ requires_env:
     description: "Twilio Auth Token — shared with the SMS platform"
     prompt: "Twilio Auth Token"
     password: true
+optional_env:
+  # RCS channel
   - name: TWILIO_MESSAGING_SERVICE_SID
-    description: "Messaging Service SID (starts with MG) with an approved RCS Sender attached"
+    description: "[RCS] Messaging Service SID (starts with MG) with an approved RCS Sender attached"
     prompt: "Twilio Messaging Service SID"
     password: false
-optional_env:
   - name: TWILIO_RCS_HOME_CHANNEL
-    description: "Default destination phone number (E.164) for cron / notification delivery"
+    description: "[RCS] Default destination phone number (E.164) for cron / notification delivery"
     prompt: "Home channel phone number (or empty)"
+    password: false
+  # Voice channel
+  - name: TWILIO_PHONE_NUMBER
+    description: "[Voice] Voice-capable Twilio phone number to call from — shared with the built-in SMS platform"
+    prompt: "Twilio phone number (E.164)"
+    password: false
+  - name: TWILIO_VOICE_TTS_VOICE
+    description: "[Voice] Twilio text-to-speech voice for <Say> (default: Polly.Joanna)"
+    prompt: "TTS voice name (or empty for default)"
     password: false

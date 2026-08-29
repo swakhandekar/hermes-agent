@@ -2,14 +2,15 @@
 dispatches to whichever channel matches the target format (see
 channels/base.py, README "Architecture notes").
 
-Channels: RCS (phone number) today. More (SMS, MMS, WhatsApp, Email,
-Voice) are expected to land in _CHANNELS over time — see README "Adding
-a new channel" for the disambiguation concern once a second channel
-shares RCS's phone-number target format.
+Channels: RCS (bare phone number) and Voice (phone number with a
+'voice:' prefix — see README "Channel dispatch" for why the prefix is
+required). More (SMS, MMS, WhatsApp, Email) are expected to land in
+_CHANNELS over time.
 
-Env vars: TWILIO_ACCOUNT_SID/AUTH_TOKEN/MESSAGING_SERVICE_SID (shared
-with the built-in sms platform), TWILIO_RCS_HOME_CHANNEL (optional cron
-target).
+Env vars: TWILIO_ACCOUNT_SID/AUTH_TOKEN (shared with the built-in sms
+platform), TWILIO_MESSAGING_SERVICE_SID (RCS), TWILIO_PHONE_NUMBER
+(Voice, also shared with sms), TWILIO_RCS_HOME_CHANNEL (optional cron
+target, RCS only).
 
 No inbound channel — connect()/disconnect() are no-ops. Delivery is
 send() (live gateway) or _standalone_send() (hermes send / cron).
@@ -23,12 +24,13 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 
 from .channels.base import Channel
 from .channels.rcs import RcsChannel
+from .channels.voice import VoiceChannel
 from .core.messages_api import aiohttp_available
 
 logger = logging.getLogger(__name__)
 
 # Channels this platform hosts — see README "Adding a new channel".
-_CHANNELS: List[Channel] = [RcsChannel()]
+_CHANNELS: List[Channel] = [RcsChannel(), VoiceChannel()]
 
 # Largest max_message_length across channels — see README for why this
 # must be the max, not any individual channel's limit, once there's more
@@ -54,7 +56,7 @@ def parse_target_ref(target_ref: str):
 def validate_target_ref(chat_id: str):
     if _channel_for_target(chat_id) is not None:
         return True
-    return "not a valid E.164 phone number"
+    return "not a valid E.164 phone number (RCS) or 'voice:+E.164' target (Voice)"
 
 
 def check_requirements() -> bool:
@@ -191,7 +193,9 @@ def register(ctx) -> None:
         emoji="💬",
         allow_update_command=False,
         platform_hint=(
-            "You are sending via Twilio RCS (with automatic SMS/MMS fallback). "
-            "Plain text only — no markdown."
+            "You are sending via Twilio. A bare phone number target sends "
+            "RCS text (with automatic SMS/MMS fallback, no markdown). A "
+            "'voice:+E.164' target places a voice call that speaks the "
+            "message (or plays a 'PLAY:<url>' audio file)."
         ),
     )
