@@ -6,12 +6,13 @@ description: >
   Outbound-only Twilio adapter for Hermes Agent, hosting multiple
   channels under one platform. Currently implements RCS (sends through
   a Twilio Messaging Service with an RCS Sender attached, falling back
-  to SMS/MMS automatically) and Voice (places an outbound call and
-  speaks the message, or plays an audio URL). Target format picks the
+  to SMS/MMS automatically), Voice (places an outbound call and speaks
+  the message, or plays an audio URL) and Email (Twilio's Email API,
+  with optional HTML bodies and attachments). Target format picks the
   channel: a bare phone number routes to RCS, a 'voice:+E.164' target
-  routes to Voice. No inbound channel; use `hermes send` or cron
-  `deliver=twilio` to send. Built to host more channels (SMS, MMS,
-  WhatsApp, Email) over time.
+  routes to Voice, an email address routes to Email. No inbound
+  channel; use `hermes send` or cron `deliver=twilio` to send. Built to
+  host more channels (SMS, MMS, WhatsApp) over time.
 
   Shares TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN with the built-in SMS
   platform and the optional telephony skill. Only one channel needs to
@@ -44,4 +45,21 @@ optional_env:
   - name: TWILIO_VOICE_TTS_VOICE
     description: "[Voice] Twilio text-to-speech voice for <Say> (default: Polly.Joanna)"
     prompt: "TTS voice name (or empty for default)"
+    password: false
+  # Email channel
+  - name: TWILIO_EMAIL_FROM
+    description: "[Email] Sender address — must be a verified sender identity for the Email product in the Twilio Console"
+    prompt: "Sender email address"
+    password: false
+  - name: TWILIO_EMAIL_FROM_NAME
+    description: "[Email] Sender display name"
+    prompt: "Sender display name (or empty)"
+    password: false
+  - name: TWILIO_EMAIL_API_BASE
+    description: "[Email] Override the API base (default https://comms.twilio.com/v1/Emails)"
+    prompt: "API base override (or empty for the public default)"
+    password: false
+  - name: TWILIO_EMAIL_HOME_CHANNEL
+    description: "[Email] Default destination address for cron / notification delivery"
+    prompt: "Home channel email address (or empty)"
     password: false

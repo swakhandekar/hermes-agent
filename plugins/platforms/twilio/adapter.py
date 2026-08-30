@@ -2,15 +2,15 @@
 dispatches to whichever channel matches the target format (see
 channels/base.py, README "Architecture notes").
 
-Channels: RCS (bare phone number) and Voice (phone number with a
-'voice:' prefix — see README "Channel dispatch" for why the prefix is
-required). More (SMS, MMS, WhatsApp, Email) are expected to land in
-_CHANNELS over time.
+Channels: RCS (bare phone number), Voice (phone number with a 'voice:'
+prefix — see README "Channel dispatch" for why the prefix is required)
+and Email (email address). More (SMS, MMS, WhatsApp) are expected to
+land in _CHANNELS over time.
 
 Env vars: TWILIO_ACCOUNT_SID/AUTH_TOKEN (shared with the built-in sms
 platform), TWILIO_MESSAGING_SERVICE_SID (RCS), TWILIO_PHONE_NUMBER
 (Voice, also shared with sms), TWILIO_RCS_HOME_CHANNEL (optional cron
-target, RCS only).
+target, RCS only), TWILIO_EMAIL_FROM (Email).
 
 No inbound channel — connect()/disconnect() are no-ops. Delivery is
 send() (live gateway) or _standalone_send() (hermes send / cron).
@@ -23,6 +23,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
 from .channels.base import Channel
+from .channels.email import EmailChannel
 from .channels.rcs import RcsChannel
 from .channels.voice import VoiceChannel
 from .core.messages_api import aiohttp_available
@@ -30,7 +31,7 @@ from .core.messages_api import aiohttp_available
 logger = logging.getLogger(__name__)
 
 # Channels this platform hosts — see README "Adding a new channel".
-_CHANNELS: List[Channel] = [RcsChannel(), VoiceChannel()]
+_CHANNELS: List[Channel] = [RcsChannel(), VoiceChannel(), EmailChannel()]
 
 # Largest max_message_length across channels — see README for why this
 # must be the max, not any individual channel's limit, once there's more
@@ -56,7 +57,10 @@ def parse_target_ref(target_ref: str):
 def validate_target_ref(chat_id: str):
     if _channel_for_target(chat_id) is not None:
         return True
-    return "not a valid E.164 phone number (RCS) or 'voice:+E.164' target (Voice)"
+    return (
+        "not a valid E.164 phone number (RCS), 'voice:+E.164' target "
+        "(Voice), or email address (Email)"
+    )
 
 
 def check_requirements() -> bool:
@@ -122,14 +126,28 @@ class TwilioAdapter(BasePlatformAdapter):
                 error=f"'{chat_id}' is not a valid target for any configured Twilio channel",
             )
 
+        # Same reconciliation as _standalone_send: html/subject arrive via
+        # metadata here, and RCS would silently ignore both.
+        if metadata and (metadata.get("html") or metadata.get("subject")):
+            metadata = dict(metadata)
+            content, option_error = _apply_channel_send_options(
+                channel, content, metadata
+            )
+            if option_error:
+                return SendResult(success=False, error=option_error)
+
         owns_session = self._http_session is None
         session = self._http_session
         if owns_session:
             import aiohttp
 
-            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), trust_env=True)
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30), trust_env=True
+            )
         try:
-            result = await channel.send(chat_id, content, metadata=metadata, session=session)
+            result = await channel.send(
+                chat_id, content, metadata=metadata, session=session
+            )
         finally:
             if owns_session:
                 await session.close()
@@ -137,6 +155,98 @@ class TwilioAdapter(BasePlatformAdapter):
         if result.get("success"):
             return SendResult(success=True, message_id=result.get("message_id", ""))
         return SendResult(success=False, error=result.get("error", "unknown error"))
+
+    async def _dispatch_attachment_call(
+        self, chat_id: str, method_name: str, *args, fallback, **kwargs
+    ):
+        """Dispatch send_image/send_document/send_multiple_images to the
+        matched channel's own method if it has one (Email does; RCS
+        doesn't), else fall back to BasePlatformAdapter's default."""
+        channel = _channel_for_target(chat_id)
+        method = getattr(channel, method_name, None) if channel else None
+        if method is None:
+            return await fallback()
+        return await method(chat_id, *args, **kwargs)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        result = await self._dispatch_attachment_call(
+            chat_id,
+            "send_image",
+            image_url,
+            caption=caption,
+            metadata=metadata,
+            fallback=lambda: super(TwilioAdapter, self).send_image(
+                chat_id,
+                image_url,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            ),
+        )
+        if isinstance(result, SendResult):
+            return result
+        if result.get("success"):
+            return SendResult(success=True, message_id=result.get("message_id", ""))
+        return SendResult(success=False, error=result.get("error", "unknown error"))
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        result = await self._dispatch_attachment_call(
+            chat_id,
+            "send_document",
+            file_path,
+            caption=caption,
+            file_name=file_name,
+            metadata=metadata,
+            fallback=lambda: super(TwilioAdapter, self).send_document(
+                chat_id,
+                file_path,
+                caption=caption,
+                file_name=file_name,
+                reply_to=reply_to,
+                metadata=metadata,
+                **kwargs,
+            ),
+        )
+        if isinstance(result, SendResult):
+            return result
+        if result.get("success"):
+            return SendResult(success=True, message_id=result.get("message_id", ""))
+        return SendResult(success=False, error=result.get("error", "unknown error"))
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images,
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        result = await self._dispatch_attachment_call(
+            chat_id,
+            "send_multiple_images",
+            images,
+            metadata=metadata,
+            fallback=lambda: super(TwilioAdapter, self).send_multiple_images(
+                chat_id, images, metadata, human_delay
+            ),
+        )
+        if isinstance(result, dict) and not result.get("success", True):
+            logger.error("[twilio] multi-image send failed: %s", result.get("error"))
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
@@ -147,6 +257,31 @@ class TwilioAdapter(BasePlatformAdapter):
         return content
 
 
+def _apply_channel_send_options(channel, message, options):
+    """Reconcile html/subject against the channel the target actually matched.
+
+    The registry entry declares the union across channels, so a phone-number
+    target reaches here with options only Email can honor. Mutates ``options``
+    in place, dropping what this channel would otherwise silently ignore.
+
+    Returns ``(message, error)`` -- a non-empty error means refuse the send.
+    """
+    if options.get("html") and not channel.supports_html:
+        options.pop("html", None)
+        return message, (
+            f"Twilio {channel.name} does not support HTML bodies -- --html "
+            f"works on email targets (e.g. 'twilio:user@example.com')."
+        )
+    subject = options.get("subject") or ""
+    if subject and not channel.supports_subject:
+        # No subject field on this channel; a header line is the only way to
+        # carry the caller's intent, matching what core does for a platform
+        # with no subject concept at all.
+        options.pop("subject", None)
+        return f"{subject}\n\n{message.lstrip()}", None
+    return message, None
+
+
 async def _standalone_send(
     pconfig,
     chat_id,
@@ -155,13 +290,29 @@ async def _standalone_send(
     thread_id=None,
     media_files=None,
     force_document=False,
+    **kwargs,
 ):
-    """Out-of-process delivery for `hermes send` and cron `deliver=twilio`
-    when no live gateway adapter is present in this process."""
+    """Out-of-process delivery for `hermes send`/cron when no live gateway
+    adapter exists. Forwards every kwarg to the matched channel — RCS
+    ignores what it doesn't use, Email reads media_files/html/schedule_at
+    — so a channel-specific option never needs a signature change here."""
     channel = _channel_for_target(chat_id)
     if channel is None:
-        return {"error": f"'{chat_id}' is not a valid target for any configured Twilio channel"}
-    return await channel.standalone_send(pconfig, chat_id, message)
+        return {
+            "error": f"'{chat_id}' is not a valid target for any configured Twilio channel"
+        }
+    message, error = _apply_channel_send_options(channel, message, kwargs)
+    if error:
+        return {"error": error}
+    return await channel.standalone_send(
+        pconfig,
+        chat_id,
+        message,
+        thread_id=thread_id,
+        media_files=media_files,
+        force_document=force_document,
+        **kwargs,
+    )
 
 
 def _is_connected(config) -> bool:
@@ -189,6 +340,11 @@ def register(ctx) -> None:
         validate_target_ref_fn=validate_target_ref,
         standalone_sender_fn=_standalone_send,
         max_message_length=_MAX_MESSAGE_LENGTH,
+        # Both are Email-only capabilities; RCS ignores them. Declared at the
+        # platform level because the registry has no per-channel granularity —
+        # _channel_for_target() decides which channel actually sees them.
+        supports_html=True,
+        supports_subject=True,
         pii_safe=True,
         emoji="💬",
         allow_update_command=False,
@@ -196,6 +352,9 @@ def register(ctx) -> None:
             "You are sending via Twilio. A bare phone number target sends "
             "RCS text (with automatic SMS/MMS fallback, no markdown). A "
             "'voice:+E.164' target places a voice call that speaks the "
-            "message (or plays a 'PLAY:<url>' audio file)."
+            "message (or plays a 'PLAY:<url>' audio file). For an "
+            "email-address target: plain text unless HTML is explicitly "
+            "requested, and unless a subject is supplied the first line of "
+            "your message becomes the subject and the rest becomes the body."
         ),
     )

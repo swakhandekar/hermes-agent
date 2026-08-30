@@ -72,6 +72,93 @@ def fake_tool(monkeypatch):
 
 
 
+def test_html_flag_reaches_the_tool_args(fake_tool, monkeypatch, tmp_path):
+    """The whole point of --html: it must arrive as a first-class tool option.
+    Without this the Twilio Email channel never sees html=True and escapes the
+    document into visible source text."""
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    page = tmp_path / "page.html"
+    page.write_text("<!DOCTYPE html>\n<html><body>Hi</body></html>")
+
+    args = _parse(["--to", "twilio:a@b.com", "--file", str(page), "--html"])
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+    assert exc.value.code == 0
+
+    sent = fake_tool.calls[0]
+    assert sent["html"] is True
+    assert sent["message"] == "<!DOCTYPE html>\n<html><body>Hi</body></html>"
+
+
+def test_html_is_never_inferred_without_the_flag(fake_tool, monkeypatch, tmp_path):
+    """A .html file alone must not switch modes -- the flag is the only
+    trigger, by design."""
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    page = tmp_path / "page.html"
+    page.write_text("<!DOCTYPE html>\n<html><body>Hi</body></html>")
+
+    args = _parse(["--to", "twilio:a@b.com", "--file", str(page)])
+    with pytest.raises(SystemExit):
+        send_cmd.cmd_send(args)
+
+    assert "html" not in fake_tool.calls[0]
+
+
+def test_subject_is_passed_as_an_option_not_prepended(fake_tool, monkeypatch):
+    """--subject used to be concatenated onto the body here. It is now a real
+    option, so a platform with a native subject field can use one and a
+    platform without gets the prepend applied downstream instead."""
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    args = _parse(["--to", "twilio:a@b.com", "--subject", "Q3 report", "body text"])
+    with pytest.raises(SystemExit):
+        send_cmd.cmd_send(args)
+
+    sent = fake_tool.calls[0]
+    assert sent["subject"] == "Q3 report"
+    assert sent["message"] == "body text"
+
+
+def test_attach_accumulates_and_resolves_to_absolute_paths(
+    fake_tool, monkeypatch, tmp_path
+):
+    """--attach is repeatable, and paths are made absolute here because
+    validate_media_delivery_path() rejects relative paths outright."""
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    one = tmp_path / "one.pdf"
+    one.write_bytes(b"%PDF-1.4")
+    two = tmp_path / "two.png"
+    two.write_bytes(b"\x89PNG")
+    monkeypatch.chdir(tmp_path)
+
+    args = _parse(
+        ["--to", "twilio:a@b.com", "--attach", "one.pdf", "--attach", "two.png", "hi"]
+    )
+    with pytest.raises(SystemExit):
+        send_cmd.cmd_send(args)
+
+    sent = fake_tool.calls[0]["attachments"]
+    assert sent == [str(one.resolve()), str(two.resolve())]
+
+
+def test_attach_missing_file_is_a_usage_error(fake_tool, monkeypatch, capsys):
+    """A named file that does not exist must fail loudly, not be dropped with
+    only a log line the caller never sees."""
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    args = _parse(["--to", "twilio:a@b.com", "--attach", "/nope/missing.pdf", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+    assert exc.value.code == 2
+    assert "no such file" in capsys.readouterr().err.lower()
+    assert fake_tool.calls == []
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------

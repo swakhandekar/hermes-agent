@@ -429,14 +429,72 @@ def _handle_send(args):
 
     from gateway.platforms.base import BasePlatformAdapter
 
+    # ── First-class send options (html/subject/attachments) ──
+    # These arrive from `hermes send` as real options rather than folded into
+    # the message text. Resolving them here — not in the CLI — is what lets a
+    # platform that has a native subject use one, while a platform that has no
+    # such concept still gets something meaningful.
+    send_html = bool(args.get("html"))
+    send_subject = args.get("subject") or ""
+    explicit_attachments = list(args.get("attachments") or [])
+
+    if send_html and not (entry is not None and entry.supports_html):
+        return tool_error(
+            f"Platform '{platform_name}' does not support --html. "
+            f"HTML bodies are currently only supported by email targets "
+            f"(e.g. 'twilio:user@example.com')."
+        )
+
+    supports_subject = entry is not None and entry.supports_subject
+    if send_subject and not supports_subject:
+        # No native subject field — a prepended header line is the only thing
+        # that carries the caller's intent. This is what `hermes send` used to
+        # do unconditionally, kept here where the platform is actually known.
+        message = f"{send_subject}\n\n{message.lstrip()}"
+        send_subject = ""
+
     # Capture [[as_document]] directive before extract_media strips it.
     # Image-extension files in this batch will route through send_document
     # instead of send_photo so the original bytes survive (e.g. info-graph
     # JPGs where Telegram's sendPhoto recompresses to 1280px).
     force_document_attachments = "[[as_document]]" in message
 
-    media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+    if send_html:
+        # extract_media() deletes the MEDIA: spans it matches from the body,
+        # and its maskers only protect markdown code blocks/JSON strings — an
+        # HTML document gets no protection, so a literal "MEDIA:...png" in an
+        # href or alt would be silently uploaded AND excised from the markup.
+        # An HTML body is delivered byte-for-byte; --attach is the only way in.
+        media_files = []
+        cleaned_message = message
+    else:
+        media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+    # Explicit --attach paths are filtered separately so a rejection can be
+    # reported instead of logged and dropped. filter_media_delivery_paths()
+    # warns and skips, which is right for a MEDIA: tag an agent guessed at but
+    # wrong for a file the caller named on the command line.
+    if explicit_attachments:
+        accepted = BasePlatformAdapter.filter_media_delivery_paths(
+            [(path, False) for path in explicit_attachments]
+        )
+        if len(accepted) != len(explicit_attachments):
+            # Re-validate individually to name the offenders: comparing against
+            # the accepted list by path would misreport, since validation
+            # resolves symlinks (/tmp -> /private/tmp on macOS).
+            rejected = [
+                path
+                for path in explicit_attachments
+                if not BasePlatformAdapter.validate_media_delivery_path(path)
+            ]
+            return tool_error(
+                "Cannot attach "
+                + ", ".join(rejected or explicit_attachments)
+                + " — the file must exist, be an absolute path, and not be a "
+                "credential/system path."
+            )
+        media_files.extend(accepted)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
     used_home_channel = False
@@ -488,6 +546,12 @@ def _handle_send(args):
             "media_files": media_files,
             "force_document": force_document_attachments,
         }
+        # Only added when actually set, so the common call shape is unchanged
+        # for the platforms that have no notion of either.
+        if send_html:
+            send_kwargs["html"] = True
+        if send_subject:
+            send_kwargs["subject"] = send_subject
         # Preserve the exact built-in call contract; only custom handlers need
         # the complete typed request.
         if entry is not None and entry.send_message_handler is not None:
@@ -836,6 +900,8 @@ async def _send_via_adapter(
     thread_id=None,
     media_files=None,
     force_document=False,
+    html=False,
+    subject="",
 ):
     """Send a message via a live gateway adapter, with a standalone fallback
     for out-of-process callers (e.g. cron running separately from the gateway).
@@ -847,6 +913,12 @@ async def _send_via_adapter(
          ``PlatformEntry`` (used when the gateway is not in this process, so
          the runner weakref is ``None``).
       3. A descriptive error explaining both options.
+
+    ``media_files``/``force_document`` are forwarded into ``metadata`` for
+    path (1), same as ``thread_id``/``publish_topic`` — ``adapter.send()``
+    has no dedicated ``media_files`` param, so this is the only way a
+    plugin's ``send()`` can see a ``MEDIA:<path>`` attachment when a live
+    adapter is connected (the common case for cron, which runs in-process).
     """
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner = None
@@ -868,6 +940,14 @@ async def _send_via_adapter(
                     metadata["thread_id"] = thread_id
                 if platform_name == "ntfy" and chat_id:
                     metadata["publish_topic"] = chat_id
+                if media_files:
+                    metadata["media_files"] = media_files
+                if force_document:
+                    metadata["force_document"] = force_document
+                if html:
+                    metadata["html"] = True
+                if subject:
+                    metadata["subject"] = subject
                 if not metadata:
                     metadata = None
                 result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
@@ -887,6 +967,14 @@ async def _send_via_adapter(
         entry = None
 
     if entry is not None and entry.standalone_sender_fn is not None:
+        # standalone_sender_fn's contract is a fixed keyword set; html/subject
+        # are only passed to a platform that declares support, so every other
+        # plugin's signature keeps working unchanged.
+        extra_kwargs = {}
+        if html and entry.supports_html:
+            extra_kwargs["html"] = True
+        if subject and entry.supports_subject:
+            extra_kwargs["subject"] = subject
         try:
             result = await entry.standalone_sender_fn(
                 pconfig,
@@ -895,6 +983,7 @@ async def _send_via_adapter(
                 thread_id=thread_id,
                 media_files=media_files,
                 force_document=force_document,
+                **extra_kwargs,
             )
         except asyncio.CancelledError:
             raise
@@ -922,7 +1011,7 @@ async def _send_via_adapter(
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None):
+async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None, html=False, subject=""):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -994,7 +1083,20 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # For short messages or platforms without a known limit this is a no-op.
     # Telegram measures length in UTF-16 code units, not Unicode codepoints.
     max_len = _MAX_LENGTHS.get(platform)
-    if max_len:
+    if html:
+        # truncate_message() splits on text boundaries, which would cut an HTML
+        # document mid-tag and deliver the halves as separate emails. An HTML
+        # body is all-or-nothing.
+        if max_len and len(message) > max_len:
+            return {
+                "error": (
+                    f"HTML body is {len(message)} characters, over "
+                    f"{platform_name}'s {max_len} limit. HTML is never split "
+                    f"into multiple messages — shorten the document."
+                )
+            }
+        chunks = [message]
+    elif max_len:
         _len_fn = utf16_len if platform == Platform.TELEGRAM else None
         chunks = BasePlatformAdapter.truncate_message(message, max_len, len_fn=_len_fn)
     else:
@@ -1267,12 +1369,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 f"target {platform.value} had only media attachments"
             )
         }
-    warning = None
-    if media_files:
-        warning = (
-            f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"
-        )
+    # Set by the plugin-platform branch below, which does forward media_files
+    # into the adapter. The hard-coded branches in this loop pass only the
+    # text chunk, so for those the attachments really are dropped and the
+    # warning is accurate. Without this flag a plugin platform that delivered
+    # its attachment fine (e.g. twilio:<email>) still reported them omitted.
+    media_forwarded = False
 
     last_result = None
     for chunk in chunks:
@@ -1312,7 +1414,9 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 except Exception as e:
                     return {"error": f"Plugin send_message handler failed: {e}"}
             # Plugin platform: route through the gateway's live adapter if
-            # available, otherwise the plugin's standalone_sender_fn.
+            # available, otherwise the plugin's standalone_sender_fn. Both
+            # carry media_files through to the adapter.
+            media_forwarded = True
             result = await _send_via_adapter(
                 platform,
                 pconfig,
@@ -1321,15 +1425,25 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 thread_id=thread_id,
                 media_files=media_files,
                 force_document=force_document,
+                html=html,
+                subject=subject,
             )
 
         if isinstance(result, dict) and result.get("error"):
             return result
         last_result = result
 
-    if warning and isinstance(last_result, dict) and last_result.get("success"):
+    if (
+        media_files
+        and not media_forwarded
+        and isinstance(last_result, dict)
+        and last_result.get("success")
+    ):
         warnings = list(last_result.get("warnings", []))
-        warnings.append(warning)
+        warnings.append(
+            f"MEDIA attachments were omitted for {platform.value}; "
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"
+        )
         last_result["warnings"] = warnings
     return last_result
 

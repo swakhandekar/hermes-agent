@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -365,12 +366,6 @@ def cmd_send(args: argparse.Namespace) -> None:
         )
         sys.exit(_USAGE_EXIT)
 
-    # Optional: prepend a subject line. Useful for alerting scripts that
-    # want a consistent header without inlining it into every call.
-    subject = getattr(args, "subject", None)
-    if subject:
-        message = f"{subject}\n\n{message.lstrip()}"
-
     # Import lazily so `hermes send --help` stays fast and does not pull in
     # the full tool registry / gateway config stack.
     from tools.send_message_tool import send_message_tool
@@ -380,11 +375,36 @@ def cmd_send(args: argparse.Namespace) -> None:
     # Signal/SMS/WhatsApp; live-adapter path for plugin platforms).
     #
     # It expects the standard tool-call dict and returns a JSON string.
+    # subject/html/attachments are passed as first-class options rather than
+    # folded into the message text. _handle_send knows the resolved platform,
+    # so it can honor them natively (Twilio Email) or fall back to prepending
+    # a header line (platforms with no subject concept) — a decision this
+    # layer cannot make.
     tool_args = {
         "action": "send",
         "target": target,
         "message": message,
     }
+    subject = getattr(args, "subject", None)
+    if subject:
+        tool_args["subject"] = subject
+    if getattr(args, "html", False):
+        tool_args["html"] = True
+    # Resolve to absolute paths here: validate_media_delivery_path() rejects
+    # relative paths outright, and a bare "./report.pdf" is the obvious way to
+    # type this flag.
+    attachments = []
+    for raw_path in getattr(args, "attachments", None) or []:
+        resolved = os.path.abspath(os.path.expanduser(raw_path))
+        if not os.path.isfile(resolved):
+            print(
+                f"hermes send: --attach {raw_path}: no such file",
+                file=sys.stderr,
+            )
+            sys.exit(_USAGE_EXIT)
+        attachments.append(resolved)
+    if attachments:
+        tool_args["attachments"] = attachments
 
     result = send_message_tool(tool_args)
     exit_code = _emit_result(
@@ -418,6 +438,8 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "  echo \"RAM 92%\" | hermes send --to telegram:-1001234567890\n"
             "  hermes send --to discord:#ops --file /tmp/report.md\n"
             "  hermes send --to slack:#eng --subject \"[CI]\" --file build.log\n"
+            "  hermes send --to twilio:a@b.com --subject \"Q3\" --file report.html --html\n"
+            "  hermes send --to twilio:a@b.com --file body.html --html --attach q3.pdf\n"
             "  hermes send --to telegram \"MEDIA:/tmp/chart.png\"   # send a media attachment\n"
             "  hermes send --list                  # all platforms\n"
             "  hermes send --list telegram         # filter by platform\n"
@@ -467,7 +489,37 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
         "--subject",
         metavar="LINE",
         default=None,
-        help="Prepend a subject/header line before the message body.",
+        help=(
+            "Subject line. Used as a real subject on platforms that have one "
+            "(e.g. Twilio Email); prepended as a header line before the body "
+            "on platforms that do not."
+        ),
+    )
+
+    parser.add_argument(
+        "--html",
+        action="store_true",
+        default=False,
+        help=(
+            "Send the body as raw HTML (email targets only). Off by default, "
+            "and never inferred from the file extension or the content — "
+            "without this flag an HTML document is delivered as escaped, "
+            "visible source text."
+        ),
+    )
+
+    parser.add_argument(
+        "-a",
+        "--attach",
+        dest="attachments",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Attach a file. Repeatable. Unlike an in-body MEDIA: tag this "
+            "never modifies the message body, so it is the only safe way to "
+            "attach a file alongside --html."
+        ),
     )
 
     parser.add_argument(
