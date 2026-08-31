@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -194,6 +195,7 @@ class SmsAdapter(BasePlatformAdapter):
         url = f"{TWILIO_API_BASE}/{self._account_sid}/Messages.json"
         headers = {
             "Authorization": self._basic_auth_header(),
+            "User-Agent": hermes_user_agent(),
         }
 
         session = self._http_session or aiohttp.ClientSession(
@@ -487,7 +489,10 @@ async def _standalone_send(
         creds = f"{account_sid}:{auth_token}"
         encoded = base64.b64encode(creds.encode("ascii")).decode("ascii")
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
-        headers = {"Authorization": f"Basic {encoded}"}
+        headers = {
+            "Authorization": f"Basic {encoded}",
+            "User-Agent": hermes_user_agent(),
+        }
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             form_data = aiohttp.FormData()
             form_data.add_field("From", from_number)
