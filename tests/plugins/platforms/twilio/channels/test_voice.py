@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -246,3 +247,47 @@ def test_standalone_send_reaches_twilio_and_gets_clean_auth_rejection(monkeypatc
 
     assert "error" in result
     assert "401" in result["error"] or "authenticat" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# App-identity User-Agent -- see tests/plugins/platforms/twilio/test_user_agent.py
+
+_UA_RE = re.compile(r"^HermesAgent/\S+$")
+
+
+def test_send_includes_hermes_user_agent(monkeypatch, channel):
+    """Calls.json traffic must be attributable to Hermes at Twilio's edge."""
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtest")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token")
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15559876543")
+
+    mock_resp = _mock_response(201, {"sid": "CAua001"})
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=_AsyncCM(mock_resp))
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        result = asyncio.run(channel.send("voice:+15551234567", "hello there"))
+
+    assert result["success"] is True
+    headers = mock_session.post.call_args.kwargs["headers"]
+    assert _UA_RE.match(headers["User-Agent"])
+    assert headers["Authorization"].startswith("Basic ")
+
+
+def test_voice_user_agent_leaks_no_phone_or_credentials(monkeypatch, channel):
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtest")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token")
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15559876543")
+
+    mock_resp = _mock_response(201, {"sid": "CAua002"})
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=_AsyncCM(mock_resp))
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        asyncio.run(channel.send("voice:+15551234567", "hello there"))
+
+    ua = mock_session.post.call_args.kwargs["headers"]["User-Agent"]
+    for secret in ("ACtest", "token", "+15551234567", "+15559876543"):
+        assert secret not in ua

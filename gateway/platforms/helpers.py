@@ -294,6 +294,32 @@ def redact_phone(phone: str) -> str:
     return phone[:4] + "****" + phone[-4:]
 
 
+# ─── Outbound App-Identity User-Agent ────────────────────────────────────────
+
+
+try:
+    from hermes_cli import __version__ as _HERMES_VERSION
+except Exception:  # pragma: no cover - adapter loaded outside package context
+    _HERMES_VERSION = "unknown"
+
+_HERMES_USER_AGENT = f"HermesAgent/{_HERMES_VERSION}"
+
+
+def hermes_user_agent() -> str:
+    """Constant app-identity User-Agent for outbound platform API calls.
+
+    Lets platform partners attribute traffic to Hermes Agent at their edge —
+    the same thing ``user_agent_prefix`` does for the Slack adapter and
+    ``X-BILLING-INVOKE-ORIGIN`` does for NVIDIA.
+
+    Carries only the app name and version. Never include per-user, per-install,
+    or per-session data (account SID, phone number, email, hostname, install or
+    session ID) — that would turn app attribution into user tracking, which
+    AGENTS.md prohibits without an opt-in gate.
+    """
+    return _HERMES_USER_AGENT
+
+
 # ─── GFM Markdown Table → Bullet Conversion ─────────────────────────────────
 # Shared by Discord and Telegram adapters.  Discord calls
 # convert_table_to_bullets() directly; Telegram imports the primitives

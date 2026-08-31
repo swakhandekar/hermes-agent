@@ -37,6 +37,20 @@ from typing import Any
 
 CONTENT_API_BASE = "https://content.twilio.com/v1/Content"
 
+# App-identity User-Agent so Twilio can attribute this traffic to Hermes Agent.
+# This module is stdlib-only by design (see the module docstring) so it can run
+# outside the Hermes venv — it therefore cannot import
+# gateway.platforms.helpers.hermes_user_agent() and keeps its own copy. Run
+# standalone, hermes_cli is unimportable and this degrades to
+# "HermesAgent/unknown", which is still attributable and still carries no user
+# data.
+try:
+    from hermes_cli import __version__ as _HERMES_VERSION
+except Exception:
+    _HERMES_VERSION = "unknown"
+
+HERMES_USER_AGENT = f"HermesAgent/{_HERMES_VERSION}"
+
 
 class ContentApiError(RuntimeError):
     """Domain-specific failure surfaced to the caller."""
@@ -80,7 +94,11 @@ def _request(method: str, url: str, *, body: dict | None = None) -> dict:
         )
 
     creds = base64.b64encode(f"{account_sid}:{auth_token}".encode("ascii")).decode("ascii")
-    headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Basic {creds}",
+        "Content-Type": "application/json",
+        "User-Agent": HERMES_USER_AGENT,
+    }
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:

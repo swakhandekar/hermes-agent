@@ -8,7 +8,7 @@ channel module (see channels/email.py)."""
 import logging
 from typing import Any, Dict, List, Optional
 
-from gateway.platforms.helpers import redact_phone
+from gateway.platforms.helpers import hermes_user_agent, redact_phone
 
 from .credentials import TWILIO_API_BASE, basic_auth_header
 
@@ -44,7 +44,10 @@ async def send_message_requests(
     import aiohttp
 
     url = f"{TWILIO_API_BASE}/{account_sid}/Messages.json"
-    headers = {"Authorization": basic_auth_header(account_sid, auth_token)}
+    headers = {
+        "Authorization": basic_auth_header(account_sid, auth_token),
+        "User-Agent": hermes_user_agent(),
+    }
     session_kwargs = session_kwargs or {}
     request_kwargs = request_kwargs or {}
 

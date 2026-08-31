@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -931,3 +932,87 @@ def test_standalone_send_reaches_twilio_email_api_and_gets_clean_rejection(monke
 
     assert "error" in result
     assert "401" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# App-identity User-Agent (see tests/plugins/platforms/twilio/test_user_agent.py
+# for the helper's own contract). Both transports below are independent copies,
+# so each needs its own assertion.
+
+_UA_RE = re.compile(r"^HermesAgent/\S+$")
+
+
+def test_send_includes_hermes_user_agent(monkeypatch):
+    """_post_email must identify Hermes to Twilio without disturbing auth."""
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+
+    mock_resp = _mock_response(202, json_body={"operationId": "op-ua-1"})
+    mock_session = MagicMock()
+    mock_session.close = AsyncMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **kwargs):
+        captured["headers"] = headers
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        result = asyncio.run(channel.send("customer@example.com", "Subject\nBody"))
+
+    assert result["success"] is True
+    assert _UA_RE.match(captured["headers"]["User-Agent"])
+    assert captured["headers"]["Authorization"].startswith("Basic ")
+    assert captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_standalone_send_includes_hermes_user_agent(monkeypatch):
+    """standalone_send has its own transport copy -- it must not drift."""
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+
+    mock_resp = _mock_response(202, json_body={"operationId": "op-ua-2"})
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **kwargs):
+        captured["headers"] = headers
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        result = asyncio.run(
+            channel.standalone_send(None, "customer@example.com", "Subject\nBody")
+        )
+
+    assert result.get("success") is True
+    assert _UA_RE.match(captured["headers"]["User-Agent"])
+    assert captured["headers"]["Authorization"].startswith("Basic ")
+
+
+def test_email_user_agent_leaks_no_recipient_or_credentials(monkeypatch):
+    """The header is app identity, not user data -- no SID, token, or address."""
+    _configure(monkeypatch)
+    channel = email_channel.EmailChannel()
+
+    mock_resp = _mock_response(202, json_body={"operationId": "op-ua-3"})
+    mock_session = MagicMock()
+    mock_session.close = AsyncMock()
+    captured = {}
+
+    def _capturing_post(url, json=None, headers=None, **kwargs):
+        captured["headers"] = headers
+        return _AsyncCM(mock_resp)
+
+    mock_session.post = MagicMock(side_effect=_capturing_post)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        asyncio.run(channel.send("customer@example.com", "Subject\nBody"))
+
+    ua = captured["headers"]["User-Agent"]
+    for secret in ("ACtestsid", "testtoken", "customer@example.com", "sender@example.com"):
+        assert secret not in ua

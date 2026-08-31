@@ -39,6 +39,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from gateway.platforms.helpers import hermes_user_agent
+
 from ..core.credentials import (
     basic_auth_header,
     get_account_credentials,
@@ -310,6 +312,7 @@ class EmailChannel(Channel):
         headers = {
             "Authorization": basic_auth_header(account_sid, auth_token),
             "Content-Type": "application/json",
+            "User-Agent": hermes_user_agent(),
         }
         content, schedule = _build_email_content(
             subject, body, html=html, attachments=attachments, schedule_at=schedule_at
@@ -561,6 +564,7 @@ class EmailChannel(Channel):
             headers = {
                 "Authorization": basic_auth_header(account_sid, auth_token),
                 "Content-Type": "application/json",
+                "User-Agent": hermes_user_agent(),
             }
             content, schedule = _build_email_content(
                 subject,

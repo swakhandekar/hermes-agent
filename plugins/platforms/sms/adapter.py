@@ -35,7 +35,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.platforms.helpers import redact_phone, strip_markdown
+from gateway.platforms.helpers import hermes_user_agent, redact_phone, strip_markdown
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
 from agent.secret_scope import get_secret as _scoped_get_secret

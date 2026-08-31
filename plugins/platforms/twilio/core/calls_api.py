@@ -4,7 +4,7 @@ calls with inline TwiML). Not for Messages.json — see messages_api.py."""
 import logging
 from typing import Any, Dict, Optional
 
-from gateway.platforms.helpers import redact_phone
+from gateway.platforms.helpers import hermes_user_agent, redact_phone
 
 from .credentials import TWILIO_API_BASE, basic_auth_header
 
@@ -31,7 +31,10 @@ async def place_call(
     import aiohttp
 
     url = f"{TWILIO_API_BASE}/{account_sid}/Calls.json"
-    headers = {"Authorization": basic_auth_header(account_sid, auth_token)}
+    headers = {
+        "Authorization": basic_auth_header(account_sid, auth_token),
+        "User-Agent": hermes_user_agent(),
+    }
     session_kwargs = session_kwargs or {}
     request_kwargs = request_kwargs or {}
 
