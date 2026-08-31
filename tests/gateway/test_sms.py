@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -321,3 +322,120 @@ class TestWebhookSignatureEnforcement:
         request = self._mock_request(oversized, content_length=None)
         resp = await adapter._handle_webhook(request)
         assert resp.status == 413
+
+
+# ── App-identity User-Agent ─────────────────────────────────────────
+# Twilio sees only raw HTTP from this adapter (no helper library), so without
+# an explicit header its traffic is indistinguishable from any other Python
+# script. send() and _standalone_send() are independent transport copies, so
+# each is asserted separately. Shape only -- never the literal version.
+
+_UA_RE = re.compile(r"^HermesAgent/\S+$")
+
+
+class _AsyncCM:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _twilio_response(sid="SMua001"):
+    resp = MagicMock()
+    resp.status = 201
+    resp.json = AsyncMock(return_value={"sid": sid})
+    return resp
+
+
+class TestSmsUserAgent:
+    """Outbound Twilio calls must identify Hermes without leaking user data."""
+
+    @pytest.mark.asyncio
+    async def test_send_includes_hermes_user_agent(self):
+        from plugins.platforms.sms.adapter import SmsAdapter
+
+        env = {
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "tok",
+            "TWILIO_PHONE_NUMBER": "+15559876543",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            adapter = SmsAdapter(PlatformConfig(enabled=True, api_key="tok"))
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=_AsyncCM(_twilio_response()))
+        mock_session.close = AsyncMock()
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await adapter.send("+15551234567", "hello")
+
+        assert result.success is True
+        headers = mock_session.post.call_args.kwargs["headers"]
+        assert _UA_RE.match(headers["User-Agent"])
+        assert headers["Authorization"].startswith("Basic ")
+
+    @pytest.mark.asyncio
+    async def test_standalone_send_includes_hermes_user_agent(self):
+        """_standalone_send has its own transport copy -- it must not drift."""
+        from plugins.platforms.sms import adapter as sms_adapter
+
+        env = {
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "tok",
+            "TWILIO_PHONE_NUMBER": "+15559876543",
+        }
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=_AsyncCM(_twilio_response("SMua002")))
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await sms_adapter._standalone_send(
+                None, "+15551234567", "hello"
+            )
+
+        assert result["success"] is True
+        headers = mock_session.post.call_args.kwargs["headers"]
+        assert _UA_RE.match(headers["User-Agent"])
+        assert headers["Authorization"].startswith("Basic ")
+
+    @pytest.mark.asyncio
+    async def test_user_agent_leaks_no_phone_or_credentials(self):
+        """App identity, not user data -- no SID, token, or phone number."""
+        from plugins.platforms.sms.adapter import SmsAdapter
+
+        env = {
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "tok",
+            "TWILIO_PHONE_NUMBER": "+15559876543",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            adapter = SmsAdapter(PlatformConfig(enabled=True, api_key="tok"))
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=_AsyncCM(_twilio_response()))
+        mock_session.close = AsyncMock()
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            await adapter.send("+15551234567", "hello")
+
+        ua = mock_session.post.call_args.kwargs["headers"]["User-Agent"]
+        for secret in ("ACtest", "tok", "+15551234567", "+15559876543"):
+            assert secret not in ua
+
+
+def test_strip_markdown_for_sms_does_not_raise():
+    """Regression: `re` was used here but never imported, so every
+    out-of-process SMS send (`hermes send`, cron delivery) raised
+    NameError at adapter.py:475 -- the module imported fine, so nothing
+    caught it until a standalone send was actually exercised."""
+    from plugins.platforms.sms.adapter import _strip_markdown_for_sms
+
+    assert _strip_markdown_for_sms("**bold** and `code`") == "bold and code"
+    assert _strip_markdown_for_sms("# Heading\n\n\n\nbody") == "Heading\n\nbody"
