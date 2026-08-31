@@ -32,6 +32,13 @@ agent's `terminal` tool shelling out to `hermes send`.
 
 ## For AI agents reading this file
 
+Channel discovery — which channel a target routes to, which channels are
+actually configured, and which channel provides a capability like SMS or MMS —
+is packaged as the bundled `twilio-channels` skill
+(`skills/communication/twilio-channels/`), active by default. Its
+`scripts/twilio_channels.py list` / `route <target>` / `find sms` answer those
+questions without reading this file end to end.
+
 There is **no agent-callable tool** for sending — `send_message` exists
 as a schema in `tools/send_message_tool.py` but is never registered into
 a toolset (see `toolsets.py` / `_HERMES_CORE_TOOLS`). To send, use your
@@ -426,6 +433,9 @@ Other notes:
    disambiguation first (see "Channel dispatch"), most likely a
    prefix kept in the parsed chat_id, not stripped.
 4. Decide what to do about `cron_deliver_env_var` — not solved generically yet.
+   Also add the channel to the `twilio-channels` skill's table
+   (`skills/communication/twilio-channels/scripts/twilio_channels.py`)
+   — `tests/skills/test_twilio_channels_skill.py` fails until you do.
 5. If it needs attachment support beyond `send()`/`standalone_send()`
    (`send_image`/`send_document`/`send_multiple_images`), implement
    those as extra methods on the channel — `adapter.py`'s
@@ -450,4 +460,11 @@ twilio/
     voice.py                # Voice — TwiML <Say>/<Play>, voice: prefix, PLAY: directive
   scripts/
     manage_content.py   # Content API template create/list/get helper
+```
+
+Related, outside this directory:
+
+```
+skills/communication/twilio-channels/        # channel discovery + routing skill
+tests/skills/test_twilio_channels_skill.py   # keeps that skill's table in sync
 ```
